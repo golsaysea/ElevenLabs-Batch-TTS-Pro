@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "ElevenLabs 批量工坊 (负载均衡版)",
+  "version": "7.7.0",
+  "description": "统一 API 池、综合额度、自动分配与切换、批量文案队列和任务续跑。",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "downloads",
+    "system.display",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://api.elevenlabs.io/*",
+    "https://elevenlabs.io/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "打开负载均衡工坊"
+  },
+  "icons": {
+     "16": "icon.png",
+     "48": "icon.png",
+     "128": "icon.png"
+  }
+}
