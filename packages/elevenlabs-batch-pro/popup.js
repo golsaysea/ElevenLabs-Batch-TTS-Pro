@@ -66,6 +66,7 @@ document.addEventListener('DOMContentLoaded', () => {
     addBtn: getEl('addCardBtn'),
     clearBtn: getEl('clearAllBtn'),
     splitLongBtn: getEl('splitLongBtn'),
+    copySheetBtn: getEl('copySheetBtn'),
     genBtn: getEl('generateBtn'),
     totalChars: getEl('totalCharsDisplay'),
     totalDuration: getEl('totalDurationDisplay'),
@@ -248,6 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
     voicePriority: 'prefer',
     batchRunning: false,
     pauseRequested: false,
+    lastBatchSheetRows: [],
     ready: false
   };
 
@@ -596,7 +598,7 @@ document.addEventListener('DOMContentLoaded', () => {
       ui.v3Stab.value = String(normalizeV3Stability(res.xi_v3_stability ?? (res.xi_model === 'eleven_v3' ? res.xi_stab : 0.5)));
       if (res.xi_v3_stability == null) chrome.storage.local.set({ xi_v3_stability: Number(ui.v3Stab.value) });
       if (res.xi_boost !== undefined && ui.boost) ui.boost.checked = res.xi_boost;
-      if (ui.autoSplit3Min) ui.autoSplit3Min.checked = res.auto_split_3m !== undefined ? Boolean(res.auto_split_3m) : true;
+      if (ui.autoSplit3Min) ui.autoSplit3Min.checked = false;
       if (res.auto_del !== undefined && ui.autoDelete) ui.autoDelete.checked = res.auto_del;
       
       // 🌟 恢复格式选择
@@ -613,6 +615,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // 恢复已保存的卡片
+      try {
+        const cachedBatch = typeof localStorage !== 'undefined' && localStorage.getItem('elevenlabs_last_batch_rows');
+        if (cachedBatch) state.lastBatchSheetRows = JSON.parse(cachedBatch);
+      } catch (_) {}
       if (ui.container) {
         ui.container.innerHTML = '';
         if (res.saved_jobs && res.saved_jobs.length > 0) {
@@ -684,6 +690,91 @@ document.addEventListener('DOMContentLoaded', () => {
       if (count > 0) setStatus(`✂️ 已将 ${count} 段超 3 分钟文案各智能拆分为 2 份`);
     });
   }
+  async function writeTextToClipboard(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {}
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    ta.remove();
+    return true;
+  }
+  function buildBatchSheetCsv(records) {
+    const escapeCsv = (val) => {
+      const str = String(val ?? '').replace(/\r\n?/g, '\n');
+      return '"' + str.replace(/"/g, '""') + '"';
+    };
+    const header = '序号,音频文件名,分段说明,字数,预计时长,状态,完整文案';
+    const lines = records.map(r => [
+      escapeCsv(r.indexLabel),
+      escapeCsv(r.audioFilename),
+      escapeCsv(r.splitNote || '原段'),
+      escapeCsv(r.chars),
+      escapeCsv(r.duration),
+      escapeCsv(r.status || '已完成'),
+      escapeCsv(r.text)
+    ].join(','));
+    return '\uFEFF' + [header, ...lines].join('\r\n') + '\r\n';
+  }
+  async function saveBatchSheetCsv(records, cfg) {
+    if (!Array.isArray(records) || !records.length) return;
+    const safe = value => String(value || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/^\.+|[. ]+$/g, '').trim();
+    const base = safe(cfg.baseFolder) || 'ElevenLabs_Pro';
+    const sub = safe(cfg.folder);
+    const csvPath = sub ? `${base}/${sub}/000_文案对照表.csv` : `${base}/000_文案对照表.csv`;
+    const csvContent = buildBatchSheetCsv(records);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    try {
+      await new Promise(resolve => {
+        chrome.downloads.download({ url, filename: csvPath, saveAs: false, conflictAction: 'uniquify' }, () => {
+          if (chrome.runtime && chrome.runtime.lastError) { /* ignore optional CSV backup failure */ }
+          resolve();
+        });
+      });
+    } catch (_) {
+    } finally {
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 2000);
+    }
+  }
+  async function copyTextsToSheet() {
+    const cards = ui.container ? Array.from(ui.container.querySelectorAll('.card')) : [];
+    let rows = cards.map(c => {
+      const ta = c.querySelector('textarea');
+      return ta ? ta.value.trim() : '';
+    }).filter(Boolean);
+    let fromBackup = false;
+    if (rows.length === 0 && Array.isArray(state.lastBatchSheetRows) && state.lastBatchSheetRows.length > 0) {
+      rows = state.lastBatchSheetRows.map(r => String(r && r.text || '').trim()).filter(Boolean);
+      fromBackup = true;
+    }
+    if (rows.length === 0) {
+      setStatus('当前没有可复制的文案', 'error');
+      return;
+    }
+    const cleanRows = rows.map(t => t.replace(/[\r\n\t]+/g, ' ').trim());
+    const sheetText = cleanRows.join('\n');
+    await writeTextToClipboard(sheetText);
+    if (ui.copySheetBtn) {
+      const prev = ui.copySheetBtn.textContent;
+      ui.copySheetBtn.textContent = `✅ 已复制 (${cleanRows.length}段)`;
+      setTimeout(() => { if (ui.copySheetBtn) ui.copySheetBtn.textContent = prev || '📋 复制到表格'; }, 1800);
+    }
+    setStatus(fromBackup
+      ? `📋 已从刚完成的任务恢复并复制 ${cleanRows.length} 段文案（可直接 Ctrl+V 粘贴到谷歌表格/Excel）`
+      : `📋 已复制 ${cleanRows.length} 段文案到剪贴板（可直接 Ctrl+V 粘贴到谷歌表格/Excel，每段占一行）`);
+  }
+  if (ui.copySheetBtn) {
+    ui.copySheetBtn.addEventListener('click', () => { copyTextsToSheet(); });
+  }
   if (ui.clearBtn) ui.clearBtn.addEventListener('click', () => {
     if (state.batchRunning || !confirm('确认清空列表?')) return;
     stopActivePreview();
@@ -695,10 +786,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function getBulkTexts() { return bulkLoadedTexts || ElevenApiPool.splitTexts(ui.bulkText.value, ui.bulkMode.value); }
   function updateBulkPreview() {
     const raw = getBulkTexts();
-    if (ui.autoSplit3Min && ui.autoSplit3Min.checked && raw.length) {
+    if (raw.length) {
       const expanded = ElevenApiPool.expandOverThreeMinutes(raw, { speed: currentSpeechSpeed() });
       if (expanded.splitCount > 0) {
-        ui.bulkPreview.textContent = `${raw.length} 段（${expanded.splitCount} 段超3分 → 自动拆为 ${expanded.texts.length} 段）`;
+        ui.bulkPreview.textContent = `${raw.length} 段（含 ${expanded.splitCount} 段超3分，导入后可点上方红钮拆分）`;
         return;
       }
     }
@@ -731,18 +822,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.batchRunning) return;
     const rawTexts = getBulkTexts();
     if (!rawTexts.length) return;
-    const expanded = ui.autoSplit3Min && ui.autoSplit3Min.checked
-      ? ElevenApiPool.expandOverThreeMinutes(rawTexts, { speed: currentSpeechSpeed() })
-      : { texts: rawTexts, splitCount: 0 };
-    const texts = expanded.texts;
+    const expanded = ElevenApiPool.expandOverThreeMinutes(rawTexts, { speed: currentSpeechSpeed() });
+    const texts = rawTexts;
     const fragment = document.createDocumentFragment();
     ui.container.querySelectorAll('.card').forEach(card => { if (!card.querySelector('textarea').value.trim()) card.remove(); });
-    texts.forEach(text => fragment.appendChild(addCard(text, false)));
+    texts.forEach((text) => {
+      const c = addCard(text, false);
+      fragment.appendChild(c);
+    });
     ui.container.appendChild(fragment);
     refreshIndexes(); saveCards(); updateStats();
     ui.bulkText.value = ''; bulkLoadedTexts = null; ui.bulkModal.classList.add('hidden');
     setStatus(expanded.splitCount > 0
-      ? `✂️ 已加入 ${texts.length} 段文案（自动将 ${expanded.splitCount} 段超 3 分钟文案各分为 2 份）`
+      ? `⚠️ 已加入 ${texts.length} 段文案（含 ${expanded.splitCount} 段超 3 分钟，如需拆分请点击上方红色按钮）`
       : `已加入 ${texts.length} 段文案`);
   });
 
@@ -1087,9 +1179,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (ui.genBtn) ui.genBtn.addEventListener('click', async () => {
     if (state.batchRunning || state.keyMaintenance) return;
     if (!getPoolKeys().length) return showError('请在设置中导入 API Key。');
-    if (ui.autoSplit3Min && ui.autoSplit3Min.checked) {
-      splitAllOverThreeMinutesCards();
-    }
     const cards = Array.from(ui.container.querySelectorAll('.card'));
     batchJobs = cards.map((card, index) => ({ card, index: card.taskData.index || index + 1, text: card.querySelector('textarea').value.trim() }))
       .filter(job => job.text && ['pending', 'failed'].includes(job.card.dataset.status));
@@ -1104,6 +1193,26 @@ document.addEventListener('DOMContentLoaded', () => {
       folder: state.folder, baseFolder: state.baseFolder };
     state.pauseRequested = false;
     batchJobs.forEach(job => { job.card.taskData.index = job.index; setTaskStatus(job.card, 'pending', null, '', false); });
+    const batchSpeed = currentSpeechSpeed();
+    const batchSheetRecords = batchJobs.map(job => {
+      const est = ElevenApiPool.estimateDuration(job.text, { speed: batchSpeed });
+      const fullPath = buildDownloadPath(job.text, cfg, job.index);
+      const audioFilename = fullPath.split('/').pop();
+      return {
+        jobId: job.card.taskData.id,
+        index: job.index,
+        indexLabel: String(job.index).padStart(4, '0'),
+        audioFilename,
+        splitNote: job.card.dataset.splitNote || '原段',
+        chars: Array.from(job.text).length,
+        duration: est.formatted,
+        status: '待生成',
+        text: job.text,
+        downloaded: false
+      };
+    });
+    state.lastBatchSheetRows = batchSheetRecords;
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem('elevenlabs_last_batch_rows', JSON.stringify(batchSheetRecords)); } catch (_) {}
     saveCards(); updateBatchProgress();
     activePool = null;
     lockBatch(true);
@@ -1149,10 +1258,22 @@ document.addEventListener('DOMContentLoaded', () => {
           job.card.audioResult = saved;
           await ElevenAudioStore.put(job.card.taskData.id, saved).catch(() => {});
           await downloadAudio(job.card, saved);
+          const rec = batchSheetRecords.find(r => r.jobId === job.card.taskData.id);
+          if (rec) {
+            rec.downloaded = true;
+            rec.status = '已完成';
+            rec.audioFilename = filename.split('/').pop();
+          }
           job.card.audioResult = null;
           await ElevenAudioStore.remove(job.card.taskData.id).catch(() => {});
         },
-        onStatus: (job, status, entry, message) => setTaskStatus(job.card, status, entry, message),
+        onStatus: (job, status, entry, message) => {
+          const rec = batchSheetRecords.find(r => r.jobId === job.card.taskData.id);
+          if (rec && ['failed', 'uncertain', 'download_failed'].includes(status)) {
+            rec.status = status === 'failed' ? '失败' : status === 'uncertain' ? '待确认' : '下载失败';
+          }
+          setTaskStatus(job.card, status, entry, message);
+        },
         onSkip: (entry, error, kind, cost) => {
           const affected = ['rate', 'uncertain'].includes(kind) && entry.accountId ?
             getPoolKeys().filter(item => item.key === entry.key || state.quotaListCache[item.key]?.accountId === entry.accountId) : [entry];
@@ -1172,6 +1293,10 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         onFatal: () => { state.pauseRequested = true; }
       });
+      if (batchSheetRecords.some(r => r.downloaded)) {
+        try { if (typeof localStorage !== 'undefined') localStorage.setItem('elevenlabs_last_batch_rows', JSON.stringify(batchSheetRecords)); } catch (_) {}
+        await saveBatchSheetCsv(batchSheetRecords, cfg);
+      }
     } catch (error) {
       showError(error.message || '批量任务异常');
     } finally {
@@ -2607,7 +2732,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const res = ElevenApiPool.splitOverThreeMinutes(raw, { speed });
     if (!res.split || res.parts.length < 2) return false;
     if (activePreview && activePreview.card === card) stopActivePreview();
+    const prevNote = card.dataset.splitNote && /^原#\d+$/.test(card.dataset.splitNote) ? card.dataset.splitNote + '-' : '';
     ta.value = res.parts[0];
+    card.dataset.splitNote = `✂️ 超3分拆分(${prevNote}1/2)`;
     card.taskData.account = '';
     card.taskData.index = 0;
     card.taskData.downloadId = null;
@@ -2617,6 +2744,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateCardMeta(card, speed);
 
     const secondCard = addCard(res.parts[1], false);
+    if (secondCard) secondCard.dataset.splitNote = `✂️ 超3分拆分(${prevNote}2/2)`;
     ui.container.insertBefore(secondCard, card.nextSibling);
     if (persist) {
       refreshIndexes();
@@ -2711,7 +2839,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <span class="dur-c">0秒</span>
           <span class="divider-vertical">|</span>
           <button class="btn-outlined task-retry hidden">重试下载</button>
-          <button type="button" class="tool-btn-icon task-split hidden" title="超过 3 分钟，智能拆分为 2 段">✂️ 分2段</button>
+          <button type="button" class="tool-btn-icon task-split hidden" title="超过 3 分钟，点击可智能拆分为 2 段">✂️ 超3分·可拆分</button>
           <button type="button" class="tool-btn-icon task-preview" title="试听本段第一句">🔊 试听首句</button>
           <button class="tool-btn-icon" title="复制并去网页版生成" style="width:auto;padding:0 5px;font-size:11px;height:24px;">🌐 网页生成</button>
           <span class="del-btn">删除</span>
@@ -2813,14 +2941,10 @@ document.addEventListener('DOMContentLoaded', () => {
          segs = plain.split(/\r\n|\n/).filter(t => t.trim());
       }
 
-      // C. 填入数据
+      // C. 填入数据（不自动拆分，超过3分钟时通过顶部红色按钮提示可拆分）
       if (segs.length > 0) {
-        let splitCount = 0;
-        if (ui.autoSplit3Min && ui.autoSplit3Min.checked) {
-          const expanded = ElevenApiPool.expandOverThreeMinutes(segs, { speed: currentSpeechSpeed() });
-          segs = expanded.texts;
-          splitCount = expanded.splitCount;
-        }
+        const expanded = ElevenApiPool.expandOverThreeMinutes(segs, { speed: currentSpeechSpeed() });
+        const overLimitCount = expanded.splitCount;
         // 第一格
         ta.value = segs[0];
         ta.dispatchEvent(new Event('input')); 
@@ -2838,8 +2962,8 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshIndexes();
         saveCards();
         updateStats();
-        if (splitCount > 0) {
-          setStatus(`✂️ 检测到 ${splitCount} 段超 3 分钟文案，已按合适位置自动分为 2 份`);
+        if (overLimitCount > 0) {
+          setStatus(`⚠️ 检测到 ${overLimitCount} 段超 3 分钟文案（未自动拆分，如需拆分请点击上方红色按钮）`);
         }
       }
     });
@@ -2890,7 +3014,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (ui.splitLongBtn) {
       ui.splitLongBtn.classList.toggle('hidden', overLimitCount === 0);
       ui.splitLongBtn.disabled = state.batchRunning || state.keyMaintenance || previewRunning || overLimitCount === 0;
-      ui.splitLongBtn.textContent = overLimitCount > 0 ? `✂️ 超3分拆2段 (${overLimitCount})` : '✂️ 超3分拆2段';
+      ui.splitLongBtn.textContent = overLimitCount > 0 ? `🔴 超3分钟·可拆分 (${overLimitCount}段)` : '🔴 超3分钟·可拆分';
     }
     ui.totalChars.textContent = `总字数: ${total}`;
     if (ui.totalDuration) {
@@ -3791,9 +3915,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const txt = ui.sttOutputText ? ui.sttOutputText.value.trim() : '';
       if (!txt) return setToolStatus('⚠️ 暂无可加入队列的识别文本', 'error');
       let segs = txt.split(/\r?\n+/).map(s => s.trim()).filter(Boolean);
-      if (ui.autoSplit3Min && ui.autoSplit3Min.checked) {
-        segs = ElevenApiPool.expandOverThreeMinutes(segs, { speed: currentSpeechSpeed() }).texts;
-      }
       const existingCards = Array.from(ui.container.querySelectorAll('.card'));
       if (existingCards.length === 1 && !existingCards[0].querySelector('textarea').value.trim()) {
         existingCards[0].remove();

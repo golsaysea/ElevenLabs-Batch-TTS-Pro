@@ -423,19 +423,24 @@
 
   function expandOverThreeMinutes(texts, options = {}) {
     const expanded = [];
+    const splitNotes = [];
     let splitCount = 0;
+    let origIdx = 0;
     for (const item of Array.isArray(texts) ? texts : []) {
       const text = String(item || '').trim();
       if (!text) continue;
+      origIdx++;
       const result = splitOverThreeMinutes(text, options);
       if (result.split && result.parts.length === 2) {
         expanded.push(result.parts[0], result.parts[1]);
+        splitNotes.push(`✂️ 超3分拆分(原#${origIdx}-1/2)`, `✂️ 超3分拆分(原#${origIdx}-2/2)`);
         splitCount++;
       } else {
         expanded.push(text);
+        splitNotes.push(`原#${origIdx}`);
       }
     }
-    return { texts: expanded, splitCount };
+    return { texts: expanded, splitNotes, splitCount };
   }
 
   function splitTexts(text, mode = 'lines') {
