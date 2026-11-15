@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>ElevenLabs 负载均衡工坊 7.8.0</title>
+  <title>ElevenLabs 负载均衡工坊 7.9.0</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
       <div class="sidebar-header">
         <div class="brand">
           <span class="logo-icon">🎙️</span>
-          <span class="logo-text">ElevenLabs <small>负载均衡 7.8.0</small></span>
+          <span class="logo-text">ElevenLabs <small>负载均衡 7.9.0</small></span>
         </div>
         <div class="header-actions">
           <button id="checkUpdateBtn" class="icon-btn-round" title="检查 GitHub 最新版本更新">🔄</button>
@@ -264,6 +264,43 @@
           <button id="otherToolsBtn" class="btn-outlined" title="打开音效生成、音乐生成、语音变声、人声提取、语音转文字工坊">🧰 其他工具</button>
           <button id="bulkImportBtn" class="btn-outlined">批量导入</button>
           <button id="addCardBtn" class="btn-outlined">+ 新段落</button>
+        </div>
+      </div>
+      <div class="batch-tag-bar" id="batchTagBar">
+        <div class="batch-tag-row">
+          <span class="batch-tag-label" title="在所有文案最前面批量添加全局演唱/情绪/语气标签（支持 Eleven v3 / v4）">🏷️ 开头标签</span>
+          <select id="prefixTagPresetSelect" class="batch-tag-preset" aria-label="常用开头标签预设" title="快速选择常用歌唱/祈祷/情绪标签填入右侧输入框">
+            <option value="">⚡ 常用标签预设...</option>
+            <option value="[Sing everything in a powerful, raspy, soulful female Gospel style with emotional vibrato and sustained notes. No speaking, singing only.]">🎤 福音深情女声独唱 (Gospel Singing Only)</option>
+            <option value="[Sing everything in a warm, emotional, melodic singing voice with gentle vibrato and sustained notes. No speaking, singing only.]">🎶 温暖深情抒情歌唱 (Melodic Singing Only)</option>
+            <option value="[Speak in a warm, reverent, gentle prayerful tone with slow pacing and heartfelt emotion.]">🙏 虔诚温暖祈祷 (Reverent Prayer)</option>
+            <option value="[Speak in a passionate, authoritative, inspiring sermon style with strong emotional conviction.]">🔥 慷慨激昂布道/演讲 (Passionate Sermon)</option>
+            <option value="[whispers]">🤫 轻柔耳语 ([whispers])</option>
+            <option value="[excited]">😊 欢快激动 ([excited])</option>
+            <option value="[emotional, sighs softly]">😢 深情感动 ([emotional, sighs softly])</option>
+            <option value="[slows down, calm and steady]">🐢 放慢沉稳 ([slows down, calm and steady])</option>
+          </select>
+          <input type="text" id="prefixTagInput" class="batch-tag-input" placeholder="输入或粘贴开头标签，如 [Sing everything in a powerful, raspy, soulful female Gospel style...]" aria-label="批量开头标签内容">
+          <button type="button" id="prependTagAllBtn" class="btn-outlined btn-tag-primary" title="将输入框中的标签一键批量添加到所有文案的开头（已存在相同开头标签则不重复添加，已有其他开头标签则自动更新）">➕ 批量加到开头</button>
+          <button type="button" id="removePrefixTagAllBtn" class="btn-outlined" title="一键移除所有文案最开头的 [...] 标签">🧹 清除开头标签</button>
+          <label class="batch-tag-auto-chk" title="勾选后，新增或批量导入文案时自动在开头加上此标签">
+            <input type="checkbox" id="autoPrependTagToggle">
+            <span>导入自动加</span>
+          </label>
+        </div>
+        <div class="batch-tag-row batch-autotag-row">
+          <span class="batch-tag-label" title="像 ElevenLabs 网页版一样，根据语义自动在文案句子间插入 [...] 情绪与语气演出标签">🎭 自动加标</span>
+          <select id="autoTagStyleSelect" class="batch-autotag-select" aria-label="自动添加标签风格模式" title="选择自动添加标签的风格模式">
+            <option value="auto" selected>🎭 自动添加标签：智能语义识别 (Auto)</option>
+            <option value="prayer">🙏 自动添加标签：虔诚祈祷 / 福音 (Prayer &amp; Gospel)</option>
+            <option value="singing">🎤 自动添加标签：深情歌唱 / 颤音 (Singing &amp; Vocal)</option>
+            <option value="story">📖 自动添加标签：沉浸叙事 / 故事 (Storytelling)</option>
+            <option value="energetic">🔥 自动添加标签：激情感染 / 演讲 (Energetic)</option>
+            <option value="gentle">🌙 自动添加标签：温柔治愈 / 电台 (Gentle &amp; Soft)</option>
+          </select>
+          <button type="button" id="autoAddTagsAllBtn" class="btn-outlined btn-autotag-action" title="为所有文案自动分析语义并插入 ElevenLabs [情绪/语气/呼吸] 演出标签">🎭 自动添加标签</button>
+          <button type="button" id="clearAllTagsBtn" class="btn-outlined" title="一键清除所有文案中的全部 [...] 标签（含开头与句中标签）">🧹 清除全部标签</button>
+          <button type="button" id="undoTagBtn" class="btn-ghost hidden" title="撤销上一次标签修改，恢复修改前的文案">↩️ 撤销标签操作</button>
         </div>
       </div>
       <div id="listContainer" class="cards-wrapper"></div>

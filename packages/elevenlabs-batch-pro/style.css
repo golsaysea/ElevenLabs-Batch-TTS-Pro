@@ -311,9 +311,32 @@ body.dark-mode .voice-cleanup-group-title { color: #fbbf24; }
 .btn-update-primary:hover { background: #059669; }
 .btn-update-link { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-main); font-size: 11px; font-weight: 600; cursor: pointer; }
 .btn-update-link:hover { border-color: var(--primary); color: var(--primary); }
+/* Batch Prefix Tag & Auto-Add Tags Bar */
+.batch-tag-bar { display: flex; flex-direction: column; gap: 6px; padding: 8px 25px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border); box-sizing: border-box; }
+.batch-tag-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.batch-tag-label { font-size: 11px; font-weight: 700; color: #9333ea; background: rgba(147, 51, 234, 0.1); border: 1px solid rgba(147, 51, 234, 0.3); padding: 3px 8px; border-radius: 6px; white-space: nowrap; flex-shrink: 0; }
+body.dark-mode .batch-tag-label { color: #d8b4fe; background: rgba(168, 85, 247, 0.18); border-color: rgba(168, 85, 247, 0.4); }
+.batch-tag-preset { width: 175px; max-width: 100%; min-width: 110px; font-size: 11px; padding: 5px 6px; flex-shrink: 0; }
+.batch-tag-input { flex: 1 1 200px; min-width: 120px; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid rgba(168, 85, 247, 0.4); background: rgba(168, 85, 247, 0.05); color: var(--text-main); }
+.batch-tag-input:focus { border-color: #9333ea; outline: none; box-shadow: 0 0 0 2px rgba(147, 51, 234, 0.15); }
+.btn-tag-primary { border-color: rgba(147, 51, 234, 0.45); color: #7e22ce; background: rgba(147, 51, 234, 0.08); font-weight: 600; white-space: nowrap; }
+.btn-tag-primary:hover { background: #9333ea; color: #ffffff; border-color: #9333ea; }
+body.dark-mode .btn-tag-primary { color: #e9d5ff; border-color: rgba(168, 85, 247, 0.5); background: rgba(168, 85, 247, 0.16); }
+body.dark-mode .btn-tag-primary:hover { background: #9333ea; color: #ffffff; }
+.batch-tag-auto-chk { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-sub); cursor: pointer; white-space: nowrap; user-select: none; margin: 0; }
+.batch-tag-auto-chk input { width: auto; margin: 0; }
+.batch-autotag-select { width: 250px; max-width: 100%; min-width: 130px; font-size: 11px; padding: 5px 8px; }
+.btn-autotag-action { border-color: rgba(219, 39, 119, 0.45); color: #be185d; background: rgba(236, 72, 153, 0.08); font-weight: 700; white-space: nowrap; }
+.btn-autotag-action:hover { background: #db2777; color: #ffffff; border-color: #db2777; }
+body.dark-mode .btn-autotag-action { color: #fbcfe8; border-color: rgba(236, 72, 153, 0.5); background: rgba(236, 72, 153, 0.16); }
+body.dark-mode .btn-autotag-action:hover { background: #db2777; color: #ffffff; }
+.task-autotag { width: auto !important; padding: 0 7px !important; height: 24px !important; font-size: 11px !important; font-weight: 600; color: #9333ea; border-color: rgba(147, 51, 234, 0.35); background: rgba(147, 51, 234, 0.06); white-space: nowrap; }
+.task-autotag:hover { background: #9333ea; color: #ffffff; border-color: #9333ea; }
+body.dark-mode .task-autotag { color: #d8b4fe; border-color: rgba(168, 85, 247, 0.45); background: rgba(168, 85, 247, 0.14); }
 @media (max-width: 850px) {
   .sidebar { width: 260px; padding: 14px; }
-  .content-toolbar, .content-footer, .batch-progress-row { padding: 12px; }
+  .content-toolbar, .content-footer, .batch-progress-row, .batch-tag-bar { padding: 10px 12px; }
+  .batch-tag-preset, .batch-autotag-select { flex: 1 1 140px; width: auto; }
   .content-toolbar { gap: 8px; align-items: flex-start; flex-direction: column; }
   .batch-progress-row { grid-template-columns: minmax(0, 1fr) auto; }
   .batch-progress-row progress { grid-row: 2; grid-column: 1 / -1; }

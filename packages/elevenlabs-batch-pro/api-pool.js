@@ -130,19 +130,24 @@
   function extractFirstSentence(text) {
     const normalized = String(text || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim();
     if (!normalized) return '';
+    const leadMatch = normalized.match(/^(?:\[[^\]\n]{1,300}\]\s*)+/);
+    const leadPrefix = leadMatch ? leadMatch[0].replace(/\s+/g, ' ').trim() : '';
+    const bodyNormalized = leadMatch ? normalized.slice(leadMatch[0].length).trim() : normalized;
+    if (!bodyNormalized) return leadPrefix.slice(0, 300);
+
     const sentenceRegex = /(?:[^。！？!?；;\n.]|\.(?=\d)|\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc)\.|[A-Za-z]\.)+(?:[。！？!?；;]+|\.{3,}|…+|\.(?!\d))?["'”’）)\]}》」』]*/gi;
     const spokenChars = value => String(value || '')
-      .replace(/\[[^\]\n]{1,40}\]/g, '')
+      .replace(/\[[^\]\n]{1,300}\]/g, '')
       .replace(/[\s"'“”‘’（()）[\]{}《》「」『』—….,，、。！？!?；;:：-]/g, '');
     let match;
     let candidate = '';
-    while ((match = sentenceRegex.exec(normalized)) !== null) {
+    while ((match = sentenceRegex.exec(bodyNormalized)) !== null) {
       const piece = match[0].trim();
       if (!piece) continue;
       candidate = candidate ? `${candidate} ${piece}` : piece;
       if (spokenChars(candidate).length > 0) break;
     }
-    if (!candidate) candidate = normalized.split(/\n+/)[0].trim();
+    if (!candidate) candidate = bodyNormalized.split(/\n+/)[0].trim();
 
     const hasSentenceEnd = /(?:[。！？!?；;…]+|\.{3,}|\.(?!\d))["'”’）)\]}》」』]*$/.test(candidate);
     const spokenLen = Array.from(spokenChars(candidate)).length;
@@ -158,7 +163,8 @@
       }
     }
     const chars = Array.from(candidate);
-    return chars.length > 80 ? chars.slice(0, 80).join('').trim() : candidate;
+    const bodySentence = chars.length > 80 ? chars.slice(0, 80).join('').trim() : candidate;
+    return leadPrefix ? `${leadPrefix} ${bodySentence}`.trim() : bodySentence;
   }
 
   function formatDuration(seconds) {
@@ -186,7 +192,7 @@
     const speed = Number.isFinite(speedInput) && speedInput > 0 ? Math.max(0.5, Math.min(2, speedInput)) : 1;
 
     let tagSeconds = 0;
-    const withoutTags = normalized.replace(/\[([^\]\n]{1,40})\]/g, (_, inner) => {
+    const withoutTags = normalized.replace(/\[([^\]\n]{1,300})\]/g, (_, inner) => {
       const tag = inner.trim().toLowerCase();
       if (/^(?:long[ _-]?)?pause|停顿|长停顿$/.test(tag)) tagSeconds += 0.7;
       else if (/^short[ _-]?pause|短停顿|气口$/.test(tag)) tagSeconds += 0.35;

@@ -4,7 +4,7 @@
 
 | 版本 (Version) | 支持状态 (Supported) |
 |---|---|
-| `v7.8.0` | ✅ 支持 |
+| `v7.9.0` | ✅ 支持 |
 
 ## 漏洞报告 (Reporting a Vulnerability)
 
@@ -20,7 +20,7 @@
 
 每次版本发布均包含以下可验证构件：
 
-- 经过合规校验的扩展压缩包：`elevenlabs-batch-pro-v7.8.0.zip`、`elevenlabs-batch-standard-v6.7.0.zip`
+- 经过合规校验的扩展压缩包：`elevenlabs-batch-pro-v7.9.0.zip`、`elevenlabs-batch-standard-v6.8.0.zip`
 - `SHA256SUMS.txt`（SHA-256 哈希校验清单）
 - `SBOM.spdx.json`（SPDX 2.3 标准软件物料清单）
 - `BUILD-PROVENANCE.txt`（构建溯源元数据）
