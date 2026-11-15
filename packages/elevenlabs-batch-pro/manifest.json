@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ElevenLabs 批量工坊 (负载均衡版)",
-  "version": "7.7.0",
-  "description": "统一 API 池、综合额度、自动分配与切换、批量文案队列和任务续跑。",
+  "version": "7.8.0",
+  "description": "统一 API 池、综合额度、自动分配与切换、音频效果、GitHub 自动更新提示。",
   "permissions": [
     "storage",
     "unlimitedStorage",

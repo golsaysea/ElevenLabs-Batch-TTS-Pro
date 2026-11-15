@@ -1,16 +1,16 @@
 # 依赖协议与静态安全审计报告 / Dependency & License Audit Report
 
-审计日期：2026-11-06  
+审计日期：2026-11-15  
 仓库名称：`golsaysea/ElevenLabs-Batch-TTS-Pro`  
-发布版本：`v7.7.0`  
+发布版本：`v7.8.0`  
 审计指南：https://tpscsm-docs.pages.dev/license-audit/
 
 ## 1. 审计范围与依赖来源 (Scope & Dependency Sources)
 
 | 发布包名称 (Package) | 源码路径 (Path) | 类型 (Type) | 外部运行时依赖 (External Dependencies) |
 |---|---|---|---|
-| `elevenlabs-batch-pro-v7.7.0` | `packages/elevenlabs-batch-pro` | Chrome MV3 Extension | 无 (0) |
-| `elevenlabs-batch-standard-v6.6.0` | `packages/elevenlabs-batch-standard` | Chrome MV3 Extension | 无 (0) |
+| `elevenlabs-batch-pro-v7.8.0` | `packages/elevenlabs-batch-pro` | Chrome MV3 Extension | 无 (0) |
+| `elevenlabs-batch-standard-v6.7.0` | `packages/elevenlabs-batch-standard` | Chrome MV3 Extension | 无 (0) |
 
 扩展包内不包含 `package.json`、`go.mod`、`requirements.txt`、`pyproject.toml`、`Cargo.toml`，也不包含任何外部 `<script src="https://...">` CDN 引用。
 
