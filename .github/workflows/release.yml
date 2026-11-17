@@ -45,8 +45,8 @@ jobs:
           )
 
           $assets = @(
-            @{ Name = "elevenlabs-batch-pro-v7.9.0"; Path = "packages/elevenlabs-batch-pro" },
-            @{ Name = "elevenlabs-batch-standard-v6.8.0"; Path = "packages/elevenlabs-batch-standard" }
+            @{ Name = "elevenlabs-batch-pro-v7.9.1"; Path = "packages/elevenlabs-batch-pro" },
+            @{ Name = "elevenlabs-batch-standard-v6.8.1"; Path = "packages/elevenlabs-batch-standard" }
           )
 
           foreach ($asset in $assets) {
@@ -95,9 +95,9 @@ jobs:
             }
             packages = @(
               [ordered]@{
-                name = "elevenlabs-batch-pro-v7.9.0"
+                name = "elevenlabs-batch-pro-v7.9.1"
                 SPDXID = "SPDXRef-Package-1"
-                versionInfo = "v7.9.0"
+                versionInfo = "v7.9.1"
                 downloadLocation = "https://github.com/$env:GITHUB_REPOSITORY"
                 filesAnalyzed = $false
                 licenseConcluded = "GPL-3.0-only"
@@ -105,9 +105,9 @@ jobs:
                 copyrightText = "NOASSERTION"
               },
               [ordered]@{
-                name = "elevenlabs-batch-standard-v6.8.0"
+                name = "elevenlabs-batch-standard-v6.8.1"
                 SPDXID = "SPDXRef-Package-2"
-                versionInfo = "v7.9.0"
+                versionInfo = "v7.9.1"
                 downloadLocation = "https://github.com/$env:GITHUB_REPOSITORY"
                 filesAnalyzed = $false
                 licenseConcluded = "GPL-3.0-only"

@@ -1191,6 +1191,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const voice = selectedVoiceId();
     const routes = getVoiceRoutes(voice);
     if (!routes.size) return showError('请选择已汇总的声音，或输入有效 Voice ID。');
+    const allJobTexts = batchJobs.map(j => j.text).join('\n');
+    if (textHasBracketAudioTag(allJobTexts) && TAG_UNSUPPORTED_V2_MODELS.has(ui.model.value)) {
+      ensureTagCompatibleModel(allJobTexts);
+    }
     const rawFormat = ui.format.value;
     const cfg = { voice, model: ui.model.value, apiFormat: selectedOutputFormat(),
       fileExt: rawFormat === 'mp3_as_mp4' ? 'mp4' : rawFormat.startsWith('pcm') ? 'wav' : 'mp3',
@@ -2620,6 +2624,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const routes = getVoiceRoutes(voice);
     if (!routes.size) return showError('请选择已汇总的声音，或输入有效 Voice ID。');
 
+    if (textHasBracketAudioTag(firstSentence) && TAG_UNSUPPORTED_V2_MODELS.has(ui.model.value)) {
+      ensureTagCompatibleModel(firstSentence);
+    }
     const modelId = ui.model.value;
     const model = state.modelList.find(item => item.model_id === modelId);
     const limit = model && model.maximum_text_length_per_request;
@@ -4629,6 +4636,44 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  const TAG_UNSUPPORTED_V2_MODELS = new Set([
+    'eleven_multilingual_v2',
+    'eleven_flash_v2_5',
+    'eleven_flash_v2',
+    'eleven_turbo_v2_5',
+    'eleven_turbo_v2',
+    'eleven_monolingual_v1',
+    'eleven_multilingual_v1'
+  ]);
+
+  function textHasBracketAudioTag(text) {
+    return /\[\s*[A-Za-z\u4e00-\u9fa5][^\]]{1,300}\]/.test(String(text || ''));
+  }
+
+  function ensureTagCompatibleModel(sampleText = '') {
+    if (!ui.model) return false;
+    const isSinging = /\[[^\]]*\b(sing|singing|gospel|melodic|vibrato|sustained notes)\b/i.test(String(sampleText || ''));
+    let switchedModel = false;
+    if (TAG_UNSUPPORTED_V2_MODELS.has(ui.model.value)) {
+      const targetModel = 'eleven_v3';
+      if (Array.from(ui.model.options || []).some(o => o.value === targetModel)) {
+        ui.model.value = targetModel;
+        chrome.storage.local.set({ xi_model: targetModel });
+        switchedModel = true;
+      }
+    }
+    if (ui.model.value === 'eleven_v3' && isSinging && ui.v3Stab && ui.v3Stab.value !== '0') {
+      ui.v3Stab.value = '0';
+      chrome.storage.local.set({ xi_v3_stability: 0 });
+    }
+    if (switchedModel) {
+      updateModelUI();
+      renderVoicePoolSummary();
+      renderGenerationSkips();
+    }
+    return switchedModel;
+  }
+
   function applyPrefixTagToAllCards() {
     if (state.batchRunning) return;
     let rawTag = prefixTagInput ? prefixTagInput.value.trim() : '';
@@ -4642,13 +4687,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (prefixTagInput) prefixTagInput.value = tag;
     persistTagToolbarConfig();
+    const autoSwitched = ensureTagCompatibleModel(tag);
 
     const cards = ui.container ? Array.from(ui.container.querySelectorAll('.card')) : [];
     const editableCards = cards.filter(card => ['pending', 'failed'].includes(card.dataset.status));
     if (!editableCards.length) {
       const newCard = addCard(tag + '\n', true);
       updateStats();
-      return setStatus(`🏷️ 已新建段落并添加开头标签：${tag.slice(0, 36)}${tag.length > 36 ? '...' : ''}`);
+      return setStatus(`🏷️ 已新建段落并添加开头标签${autoSwitched ? '（已自动切换为 Eleven v3 模型以支持标签）' : ''}`);
     }
 
     saveTagUndoSnapshot();
@@ -4667,9 +4713,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     saveCards();
     updateStats();
-    const modelTip = ['eleven_v3', 'eleven_v4', 'eleven_v4_turbo'].includes(ui.model && ui.model.value)
-      ? ''
-      : '（提示：建议切换至 Eleven v3 或 Eleven v4 模型以解析 [...] 标签）';
+    const modelTip = autoSwitched
+      ? '（已自动切换至 Eleven v3 模型以生效 [...] 标签）'
+      : `（当前模型：${ui.model ? ui.model.value : 'eleven_v3'}）`;
     setStatus(`🏷️ 已批量在 ${updatedCount} 段文案开头添加标签${modelTip}`);
   }
 
@@ -4702,10 +4748,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const mode = autoTagStyleSelect ? autoTagStyleSelect.value : 'auto';
     const customPrefix = (autoPrependTagToggle && autoPrependTagToggle.checked && prefixTagInput) ? prefixTagInput.value : '';
     ta.value = autoTagText(ta.value, mode, customPrefix);
+    const autoSwitched = ensureTagCompatibleModel(ta.value);
     updateCardMeta(card);
     saveCards();
     updateStats();
-    setStatus('🎭 已为当前段落自动添加 [...] 情绪与语气标签');
+    setStatus(`🎭 已为当前段落自动添加 [...] 情绪与语气标签${autoSwitched ? '（已自动切换至 Eleven v3 模型）' : ''}`);
   }
 
   function autoAddTagsToAllCards() {
@@ -4720,20 +4767,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const mode = autoTagStyleSelect ? autoTagStyleSelect.value : 'auto';
     const customPrefix = (autoPrependTagToggle && autoPrependTagToggle.checked && prefixTagInput) ? prefixTagInput.value : '';
     let taggedCount = 0;
+    let combinedSample = '';
     cards.forEach((card) => {
       const ta = card.querySelector('textarea');
       const next = autoTagText(ta.value, mode, customPrefix);
+      combinedSample += '\n' + next;
       if (next !== ta.value) {
         ta.value = next;
         updateCardMeta(card);
         taggedCount++;
       }
     });
+    const autoSwitched = ensureTagCompatibleModel(combinedSample);
     saveCards();
     updateStats();
-    const modelTip = ['eleven_v3', 'eleven_v4', 'eleven_v4_turbo'].includes(ui.model && ui.model.value)
-      ? ''
-      : '（建议搭配 Eleven v3 / Eleven v4 模型使用）';
+    const modelTip = autoSwitched
+      ? '（已自动切换至 Eleven v3 模型以生效 [...] 标签）'
+      : '';
     setStatus(`🎭 已为 ${taggedCount || cards.length} 段文案自动添加标签${modelTip}`);
   }
 
@@ -4793,9 +4843,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 🔄 GitHub 自动检查更新与提示下载
   const GITHUB_REPO = 'golsaysea/ElevenLabs-Batch-TTS-Pro';
-  const CURRENT_EXT_VERSION = '7.9.0';
+  const CURRENT_EXT_VERSION = '7.9.1';
   const REMOTE_MANIFEST_PATH = 'packages/elevenlabs-batch-pro/manifest.json';
-  const DEFAULT_ZIP_NAME = 'elevenlabs-batch-pro-v7.9.0.zip';
+  const DEFAULT_ZIP_NAME = 'elevenlabs-batch-pro-v7.9.1.zip';
   const checkUpdateBtn = document.getElementById('checkUpdateBtn');
   const githubUpdateBanner = document.getElementById('githubUpdateBanner');
   const githubUpdateText = document.getElementById('githubUpdateText');
