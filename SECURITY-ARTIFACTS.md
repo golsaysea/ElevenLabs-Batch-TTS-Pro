@@ -4,8 +4,8 @@
 
 | 构件名称 (Artifact) | 说明 (Description) |
 |---|---|
-| `elevenlabs-batch-pro-v8.0.0.zip` | 主扩展程序发布包 (MV3) |
-| `elevenlabs-batch-standard-v6.9.0.zip` | 辅助扩展程序发布包 (MV3) |
+| `elevenlabs-batch-pro-v8.0.2.zip` | 主扩展程序发布包 (MV3) |
+| `elevenlabs-batch-standard-v6.9.1.zip` | 辅助扩展程序发布包 (MV3) |
 | `SHA256SUMS.txt` | 所有发布 `.zip` 压缩包的 SHA-256 校验和 |
 | `SBOM.spdx.json` | SPDX 2.3 标准软件物料清单 (Software Bill of Materials) |
 | `BUILD-PROVENANCE.txt` | 构建版本标签、提交哈希、构建环境与 UTC 时间戳 |
@@ -21,8 +21,8 @@ sha256sum -c SHA256SUMS.txt
 Windows PowerShell:
 
 ```powershell
-Get-FileHash .\elevenlabs-batch-pro-v8.0.0.zip -Algorithm SHA256
-Get-FileHash .\elevenlabs-batch-standard-v6.9.0.zip -Algorithm SHA256
+Get-FileHash .\elevenlabs-batch-pro-v8.0.2.zip -Algorithm SHA256
+Get-FileHash .\elevenlabs-batch-standard-v6.9.1.zip -Algorithm SHA256
 ```
 
 ## 2. 验证 GitHub 构件证明 (Verify GitHub Artifact Attestation)
@@ -30,8 +30,8 @@ Get-FileHash .\elevenlabs-batch-standard-v6.9.0.zip -Algorithm SHA256
 使用 GitHub CLI (`gh`):
 
 ```bash
-gh attestation verify elevenlabs-batch-pro-v8.0.0.zip -R golsaysea/ElevenLabs-Batch-TTS-Pro
-gh attestation verify elevenlabs-batch-standard-v6.9.0.zip -R golsaysea/ElevenLabs-Batch-TTS-Pro
+gh attestation verify elevenlabs-batch-pro-v8.0.2.zip -R golsaysea/ElevenLabs-Batch-TTS-Pro
+gh attestation verify elevenlabs-batch-standard-v6.9.1.zip -R golsaysea/ElevenLabs-Batch-TTS-Pro
 ```
 
 ## 3. 查看软件物料清单 (Inspect SBOM)
