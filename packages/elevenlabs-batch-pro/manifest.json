@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ElevenLabs 批量工坊 (负载均衡版)",
-  "version": "8.0.0",
+  "version": "8.0.1",
   "description": "统一 API 池、综合额度、跨 API 账号一键复制/同步音色（兼容免费号）、音频效果、自动添加标签与批量开头标签、GitHub 自动更新提示。",
   "permissions": [
     "storage",

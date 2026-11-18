@@ -19,6 +19,18 @@
     return match ? match[0].toLowerCase() : '';
   }
 
+  function extractRemainingCredits(error = {}) {
+    const text = `${error.rawMessage || ''} ${error.message || ''}`;
+    const match = text.match(/\bhave\s+(\d+)\s+(?:credits?|characters?)\s+remaining\b/i) ||
+      text.match(/\b(\d+)\s+(?:credits?|characters?)\s+(?:remaining|left)\b/i) ||
+      text.match(/剩余(?:额度)?[为：:\s]*(\d+)\s*(?:credits?|字符|积分)?/i);
+    if (match) {
+      const value = Number(match[1]);
+      if (Number.isFinite(value) && value >= 0) return value;
+    }
+    return null;
+  }
+
   function classifyError(error = {}) {
     if (error.kind) return error.kind;
     const status = Number(error.status || 0);
@@ -89,7 +101,11 @@
       if (scope === 'quota' && (!Number.isFinite(cost) || cost < 1)) return null;
       const retry = Number(error.retryAfterMs);
       const until = scope === 'quota' ? now + 300000 : scope === 'rate' ? now + Math.max(30000, Number.isFinite(retry) ? Math.max(0, retry) : 0) : scope === 'uncertain' ? now + 60000 : 0;
-      const record = { key, scope, voice, model, format, ts: now, until, ceiling: scope === 'quota' ? cost - 1 : undefined,
+      const exactRem = scope === 'quota' ? extractRemainingCredits(error) : null;
+      const quotaCeiling = scope === 'quota'
+        ? (Number.isFinite(exactRem) ? Math.min(cost - 1, Math.max(0, exactRem)) : cost - 1)
+        : undefined;
+      const record = { key, scope, voice, model, format, ts: now, until, ceiling: quotaCeiling,
         httpStatus: Number(error.status) || 0, code: String(error.code || '').split(key).join('[Key]').slice(0, 100),
         message: String(error.rawMessage || error.message || '请求失败').split(key).join('[Key]').slice(0, 500) };
       const previous = this.records.get(this.id(record));
@@ -510,9 +526,10 @@
 
     acquire(cost, tried) {
       const comparePriority = (a, b) => a.priorityRank - b.priorityRank || b.priorityCoverage - a.priorityCoverage || a.priorityReserved - b.priorityReserved;
+      const hasKnownSufficient = entry => (Number.isFinite(entry.account.remaining) && entry.account.remaining >= cost) ? 0 : 1;
       const available = this.candidates(cost, tried)
         .filter(entry => Math.max(entry.readyAt, entry.account.readyAt) <= Date.now())
-        .sort((a, b) => comparePriority(a, b) || a.uses - b.uses || (b.account.remaining ?? -1) - (a.account.remaining ?? -1));
+        .sort((a, b) => comparePriority(a, b) || hasKnownSufficient(a) - hasKnownSufficient(b) || a.uses - b.uses || (b.account.remaining ?? -1) - (a.account.remaining ?? -1));
       const best = available[0];
       // Busy preferred accounts are not exhausted: wait instead of spending protected credits.
       const entry = best && available.find(item => !item.busy && !item.account.busy && comparePriority(item, best) === 0);
@@ -602,7 +619,17 @@
           const kind = charged ? 'download' : classifyError(error);
           lastMessage = error.message || '请求失败';
           if (kind === 'quota') {
-            entry.ceiling = Math.min(entry.ceiling, cost - 1);
+            entry.quotaStrikes = (entry.quotaStrikes || 0) + 1;
+            const exactRem = extractRemainingCredits(error);
+            if (Number.isFinite(exactRem)) {
+              entry.account.remaining = entry.account.remaining === null ? exactRem : Math.min(entry.account.remaining, exactRem);
+              entry.ceiling = Math.min(entry.ceiling, Math.max(0, exactRem), cost - 1);
+            } else if (entry.quotaStrikes >= 2) {
+              entry.account.remaining = 0;
+              entry.ceiling = 0;
+            } else {
+              entry.ceiling = Math.min(entry.ceiling, cost - 1);
+            }
             // A key-specific credit limit does not invalidate sibling keys.
             tried.add(entry.key);
           } else if (kind === 'key' || kind === 'access' || kind === 'format') {

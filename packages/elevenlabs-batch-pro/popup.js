@@ -1074,6 +1074,20 @@ document.addEventListener('DOMContentLoaded', () => {
       } finally { releaseQuotaSlot(); }
       if (state.quotaListCache[key]?.accountId !== info.accountId) allocationCache = null;
       state.quotaListCache[key] = info;
+      if (activePool && Array.isArray(activePool.entries)) {
+        for (const poolEntry of activePool.entries) {
+          if (poolEntry.key === key || (info.accountId && poolEntry.accountId === info.accountId)) {
+            if (info.disabled) poolEntry.disabled = true;
+            if (info.quotaState === 'quota') {
+              poolEntry.account.remaining = 0;
+              poolEntry.ceiling = 0;
+            } else if (Number.isFinite(info.left)) {
+              poolEntry.account.remaining = poolEntry.account.remaining === null ? info.left : Math.min(poolEntry.account.remaining, info.left);
+              if (info.left <= 0) poolEntry.ceiling = 0;
+            }
+          }
+        }
+      }
       scheduleQuotaSave();
       schedulePoolRender();
       return info;
@@ -1229,16 +1243,62 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       setStatus('使用本地声音映射分配任务');
       const priorities = getAllocationPriorities();
-      activePool = new ElevenApiPool.Pool(getPoolKeys().filter(item => routes.has(item.key) && getVoiceCache(item.key, routes.get(item.key))?.access !== 'unavailable').map(item => {
-        const info = state.quotaListCache[item.key] || {};
-        const fresh = ElevenVoiceIndex.freshQuota(info);
-        const limits = state.generationSkips.limits(item.key, routes.get(item.key), cfg.model, cfg.apiFormat);
-        const priority = priorities.get(item.key);
-        return { ...item, voiceId: routes.get(item.key), remaining: fresh ? info.left : null, accountId: info.accountId,
-          disabled: Boolean(fresh && info.disabled) || limits.disabled || priority.blocked, ceiling: limits.ceiling, readyAt: limits.readyAt,
-          priorityRank: priority.rank, priorityCoverage: priority.coverage, priorityReserved: priority.reserved,
-          skipReason: priority.blocked ? '当前策略保留自定义声音额度，系统声音只使用系统专用账号。' : limits.disabled ? generationDiagnostic(limits.record) : '' };
-      }));
+      const selectedFamily = allocationSelection();
+      const allowPersonalFallback = Boolean((selectedFamily && selectedFamily.category !== 'premade') || String(voice || '').startsWith('own:')) && state.voicePriority !== 'protect';
+      const buildPoolEntries = () => {
+        const entries = [];
+        for (const item of getPoolKeys()) {
+          let mappedVoiceId = routes.get(item.key);
+          let isFallbackVoice = false;
+          if (!mappedVoiceId && allowPersonalFallback) {
+            const lib = state.voiceLibraries.get(item.key);
+            if (lib && Array.isArray(lib.voices) && lib.voices.length > 0) {
+              const personal = lib.voices.find(v => v && v.voice_id && v.category !== 'premade' && v.is_owner !== false);
+              if (personal) {
+                mappedVoiceId = personal.voice_id;
+                isFallbackVoice = true;
+              }
+            } else if (!lib) {
+              mappedVoiceId = '__auto_discover__';
+              isFallbackVoice = true;
+            }
+          }
+          if (!mappedVoiceId) continue;
+          if (mappedVoiceId !== '__auto_discover__' && getVoiceCache(item.key, mappedVoiceId)?.access === 'unavailable') continue;
+          const info = state.quotaListCache[item.key] || {};
+          const fresh = ElevenVoiceIndex.freshQuota(info);
+          const knownZero = !fresh && !info.needsQuotaRefresh && Number.isFinite(info.left) && info.left <= 0 &&
+            Number.isFinite(info.ts) && info.ts <= Date.now() && (!info.resetUnix || info.resetUnix * 1000 > Date.now());
+          const quotaBlocked = fresh && info.quotaState === 'quota';
+          const effectiveVoiceForLimits = mappedVoiceId === '__auto_discover__' ? '' : mappedVoiceId;
+          const limits = state.generationSkips.limits(item.key, effectiveVoiceForLimits, cfg.model, cfg.apiFormat);
+          const priority = priorities.get(item.key) || { rank: 1, coverage: 0, reserved: 0, blocked: false };
+          entries.push({
+            ...item,
+            voiceId: mappedVoiceId,
+            isFallbackVoice,
+            remaining: quotaBlocked ? 0 : (fresh || knownZero) ? info.left : null,
+            accountId: info.accountId,
+            disabled: Boolean(fresh && info.disabled) || limits.disabled || priority.blocked,
+            ceiling: quotaBlocked || knownZero ? 0 : limits.ceiling,
+            readyAt: limits.readyAt,
+            priorityRank: isFallbackVoice ? 3 : priority.rank,
+            priorityCoverage: priority.coverage,
+            priorityReserved: priority.reserved,
+            skipReason: priority.blocked ? '当前策略保留自定义声音额度，系统声音只使用系统专用账号。' : limits.disabled ? generationDiagnostic(limits.record) : ''
+          });
+        }
+        return entries;
+      };
+      activePool = new ElevenApiPool.Pool(buildPoolEntries());
+      if (activePool.candidates(1, new Set()).length === 0) {
+        const currentSkips = state.generationSkips.values();
+        if (currentSkips.some(r => r && (r.scope === 'voice' || r.scope === 'quota'))) {
+          const retained = currentSkips.filter(r => r && r.scope !== 'voice' && r.scope !== 'quota');
+          state.generationSkips = new ElevenApiPool.GenerationSkips(retained);
+          activePool = new ElevenApiPool.Pool(buildPoolEntries());
+        }
+      }
       const model = state.modelList.find(item => item.model_id === cfg.model);
       const limit = model && model.maximum_text_length_per_request;
       const tasks = batchJobs.filter(job => {
@@ -1249,14 +1309,43 @@ document.addEventListener('DOMContentLoaded', () => {
         concurrency: state.concurrency, stopped: () => state.pauseRequested,
         estimate: text => ElevenApiPool.estimateCost(text, model),
         generate: async (job, entry) => {
-          if (!ElevenVoiceIndex.freshQuota(state.quotaListCache[entry.key])) {
-            const info = await getQuotaInfo(entry.key);
+          let info = state.quotaListCache[entry.key];
+          const recentPermissionSkip = Boolean(info && info.quotaState === 'permission' && Number.isFinite(info.ts) && Date.now() - info.ts < 1800000);
+          const knownExhaustedSkip = Boolean(info && !info.needsQuotaRefresh && Number.isFinite(info.left) && info.left <= 0 &&
+            Number.isFinite(info.ts) && info.ts <= Date.now() && (!info.resetUnix || info.resetUnix * 1000 > Date.now()));
+          if (!ElevenVoiceIndex.freshQuota(info) && !recentPermissionSkip && !knownExhaustedSkip) {
+            info = await getQuotaInfo(entry.key);
+          }
+          info = state.quotaListCache[entry.key] || info;
+          if (info) {
             if (info.disabled) throw Object.assign(new Error(info.message || 'API 不可用'), {
               preflight: true, status: info.httpStatus || (info.invalid ? 401 : 403), code: info.errorCode || (info.invalid ? 'invalid_api_key' : 'workspace_access_denied') });
+            if (info.quotaState === 'quota') {
+              entry.account.remaining = 0;
+              entry.ceiling = 0;
+              throw Object.assign(new Error('当前账号额度受限 (You have 0 credits remaining)'), { preflight: true, status: 401, code: 'quota_exceeded' });
+            }
             if (Number.isFinite(info.left)) {
               entry.account.remaining = info.left;
-              if (info.left < ElevenApiPool.estimateCost(job.text, model)) throw Object.assign(new Error('当前账号额度不足'), { preflight: true, status: 401, code: 'quota_exceeded' });
+              const requiredCost = ElevenApiPool.estimateCost(job.text, model);
+              if (info.left < requiredCost) {
+                entry.ceiling = Math.min(entry.ceiling, Math.max(0, info.left));
+                throw Object.assign(new Error(`当前账号额度不足 (You have ${info.left} credits remaining)`), { preflight: true, status: 401, code: 'quota_exceeded' });
+              }
             }
+          }
+          if (entry.voiceId === '__auto_discover__') {
+            const lib = await getVoiceLibrary(entry.key).catch(() => null);
+            const voices = (lib && Array.isArray(lib.voices)) ? lib.voices : [];
+            const targetFamilyName = selectedFamily ? normalizeVoiceNameKey(selectedFamily.name) : '';
+            const exact = targetFamilyName ? voices.find(v => v && v.voice_id && normalizeVoiceNameKey(v.name) === targetFamilyName) : null;
+            const personal = voices.find(v => v && v.voice_id && v.category !== 'premade' && v.is_owner !== false);
+            const fallbackAny = voices.find(v => v && v.voice_id);
+            const chosen = exact || personal || fallbackAny;
+            if (!chosen) {
+              throw Object.assign(new Error('此账号声音库中未找到可用音色'), { status: 404, code: 'voice_not_found' });
+            }
+            entry.voiceId = chosen.voice_id;
           }
           const result = await generate(job.text, { ...cfg, voice: entry.voiceId, key: entry.key });
           state.voiceAccessCache.set(voiceCacheKey(entry.key, entry.voiceId), { key: entry.key, voice: entry.voiceId, access: 'available', ts: Date.now() });
@@ -1287,7 +1376,7 @@ document.addEventListener('DOMContentLoaded', () => {
         onSkip: (entry, error, kind, cost) => {
           const affected = ['rate', 'uncertain'].includes(kind) && entry.accountId ?
             getPoolKeys().filter(item => item.key === entry.key || state.quotaListCache[item.key]?.accountId === entry.accountId) : [entry];
-          for (const item of affected) state.generationSkips.mark(error, { key: item.key, voice: routes.get(item.key), model: cfg.model, format: cfg.apiFormat, cost });
+          for (const item of affected) state.generationSkips.mark(error, { key: item.key, voice: routes.get(item.key) || entry.voiceId, model: cfg.model, format: cfg.apiFormat, cost });
           scheduleQuotaSave();
           renderGenerationSkips();
         },
@@ -1295,7 +1384,7 @@ document.addEventListener('DOMContentLoaded', () => {
           for (const entry of pool.entries) {
             if (entry.account !== changedEntry.account) continue;
             const info = state.quotaListCache[entry.key];
-            if (info) { info.left = entry.account.remaining; info.ts = Date.now(); }
+            if (info && Number.isFinite(entry.account.remaining)) { info.left = entry.account.remaining; info.ts = Date.now(); }
             if (entry.key === state.currentKey && Number.isFinite(entry.account.remaining)) { state.currentQuota = entry.account.remaining; updateStatsUI(state.currentQuota); }
           }
           scheduleQuotaSave();
@@ -1463,8 +1552,16 @@ document.addEventListener('DOMContentLoaded', () => {
     return label + (priority.blocked ? ' · 已保护' : '');
   }
   function getVoiceRoutes(selection = selectedVoiceId(), ignoreCustom = false) {
+    ensureVoiceFamilies();
     const custom = !ignoreCustom && ui.customVoiceId.value.trim();
-    const family = !custom && state.voiceFamilies.get(selection);
+    let family = !custom && state.voiceFamilies.get(selection);
+    if (!custom && !family && typeof selection === 'string' && selection.startsWith('own:')) {
+      const targetNameKey = normalizeVoiceNameKey(decodeURIComponent(selection.slice(4)));
+      family = [...state.voiceFamilies.values()].find(f => f.category !== 'premade' && normalizeVoiceNameKey(f.name) === targetNameKey) || null;
+    }
+    if (!custom && !family && selection) {
+      family = [...state.voiceFamilies.values()].find(f => f.voiceIds && f.voiceIds.has(selection)) || null;
+    }
     if (family && family.category !== 'premade') return ElevenVoiceIndex.routes(family, state.voiceOverrides[family.id]);
     const id = custom || (family && family.id) || selection;
     return /^[A-Za-z0-9_-]+$/.test(id || '') ? new Map(getPoolKeys().map(item => [item.key, id])) : new Map();
@@ -1757,7 +1854,17 @@ document.addEventListener('DOMContentLoaded', () => {
     libraryScan = scan;
     syncKeyMaintenanceControls();
     try { await scan; }
-    finally { libraryScan = null; libraryProgress = null; syncKeyMaintenanceControls(); renderVoiceLibraries(); renderVoicePoolSummary(); }
+    finally {
+      libraryScan = null;
+      libraryProgress = null;
+      state.voiceAccessCache.clear();
+      const nonVoiceSkips = state.generationSkips.values().filter(r => r && r.scope !== 'voice');
+      state.generationSkips = new ElevenApiPool.GenerationSkips(nonVoiceSkips);
+      scheduleQuotaSave();
+      syncKeyMaintenanceControls();
+      renderVoiceLibraries();
+      renderVoicePoolSummary();
+    }
   }
 
   ui.scanVoiceLibrariesBtn.addEventListener('click', () => scanVoiceLibraries());
@@ -2664,15 +2771,18 @@ document.addEventListener('DOMContentLoaded', () => {
       const pool = new ElevenApiPool.Pool(getPoolKeys().filter(item => routes.has(item.key) && getVoiceCache(item.key, routes.get(item.key))?.access !== 'unavailable').map(item => {
         const info = state.quotaListCache[item.key] || {};
         const fresh = ElevenVoiceIndex.freshQuota(info);
+        const knownZero = !fresh && !info.needsQuotaRefresh && Number.isFinite(info.left) && info.left <= 0 &&
+          Number.isFinite(info.ts) && info.ts <= Date.now() && (!info.resetUnix || info.resetUnix * 1000 > Date.now());
+        const quotaBlocked = fresh && info.quotaState === 'quota';
         const limits = state.generationSkips.limits(item.key, routes.get(item.key), cfg.model, cfg.apiFormat);
         const priority = priorities.get(item.key);
         return {
           ...item,
           voiceId: routes.get(item.key),
-          remaining: fresh ? info.left : null,
+          remaining: quotaBlocked ? 0 : (fresh || knownZero) ? info.left : null,
           accountId: info.accountId,
           disabled: Boolean(fresh && info.disabled) || limits.disabled || priority.blocked,
-          ceiling: limits.ceiling,
+          ceiling: quotaBlocked || knownZero ? 0 : limits.ceiling,
           readyAt: limits.readyAt,
           priorityRank: priority.rank,
           priorityCoverage: priority.coverage,
@@ -2686,14 +2796,30 @@ document.addEventListener('DOMContentLoaded', () => {
         stopped: () => state.batchRunning,
         estimate: text => ElevenApiPool.estimateCost(text, model),
         generate: async (job, entry) => {
-          if (!ElevenVoiceIndex.freshQuota(state.quotaListCache[entry.key])) {
-            const info = await getQuotaInfo(entry.key);
+          let info = state.quotaListCache[entry.key];
+          const recentPermissionSkip = Boolean(info && info.quotaState === 'permission' && Number.isFinite(info.ts) && Date.now() - info.ts < 1800000);
+          const knownExhaustedSkip = Boolean(info && !info.needsQuotaRefresh && Number.isFinite(info.left) && info.left <= 0 &&
+            Number.isFinite(info.ts) && info.ts <= Date.now() && (!info.resetUnix || info.resetUnix * 1000 > Date.now()));
+          if (!ElevenVoiceIndex.freshQuota(info) && !recentPermissionSkip && !knownExhaustedSkip) {
+            info = await getQuotaInfo(entry.key);
+          }
+          info = state.quotaListCache[entry.key] || info;
+          if (info) {
             if (info.disabled) throw Object.assign(new Error(info.message || 'API 不可用'), {
               preflight: true, status: info.httpStatus || (info.invalid ? 401 : 403), code: info.errorCode || (info.invalid ? 'invalid_api_key' : 'workspace_access_denied')
             });
+            if (info.quotaState === 'quota') {
+              entry.account.remaining = 0;
+              entry.ceiling = 0;
+              throw Object.assign(new Error('当前账号额度受限 (You have 0 credits remaining)'), { preflight: true, status: 401, code: 'quota_exceeded' });
+            }
             if (Number.isFinite(info.left)) {
               entry.account.remaining = info.left;
-              if (info.left < ElevenApiPool.estimateCost(job.text, model)) throw Object.assign(new Error('当前账号额度不足'), { preflight: true, status: 401, code: 'quota_exceeded' });
+              const requiredCost = ElevenApiPool.estimateCost(job.text, model);
+              if (info.left < requiredCost) {
+                entry.ceiling = Math.min(entry.ceiling, Math.max(0, info.left));
+                throw Object.assign(new Error(`当前账号额度不足 (You have ${info.left} credits remaining)`), { preflight: true, status: 401, code: 'quota_exceeded' });
+              }
             }
           }
           const result = await generate(job.text, { ...cfg, voice: entry.voiceId, key: entry.key });
@@ -2718,7 +2844,7 @@ document.addEventListener('DOMContentLoaded', () => {
           for (const entry of poolInstance.entries) {
             if (entry.account !== changedEntry.account) continue;
             const info = state.quotaListCache[entry.key];
-            if (info) { info.left = entry.account.remaining; info.ts = Date.now(); }
+            if (info && Number.isFinite(entry.account.remaining)) { info.left = entry.account.remaining; info.ts = Date.now(); }
             if (entry.key === state.currentKey && Number.isFinite(entry.account.remaining)) { state.currentQuota = entry.account.remaining; updateStatsUI(state.currentQuota); }
           }
           scheduleQuotaSave();
@@ -5385,7 +5511,39 @@ document.addEventListener('DOMContentLoaded', () => {
     return null;
   }
 
-  async function syncVoiceToSingleAccount(targetKey, targetName, voicePrompt, mode, autoReplaceSlot, sourceMeta) {
+  async function renameExistingVoiceToTarget(apiKey, existingVoice, targetName) {
+    const voiceId = existingVoice && existingVoice.voice_id;
+    if (!voiceId) throw new Error('未找到可改名的现有自定义音色');
+    try {
+      const fd = new FormData();
+      fd.append('name', targetName);
+      const res = await fetchWithTimeout(`https://api.elevenlabs.io/v1/voices/${encodeURIComponent(voiceId)}/edit`, {
+        method: 'POST',
+        headers: { 'xi-api-key': apiKey },
+        body: fd
+      }, 15000);
+      if (res.ok) {
+        return { voice_id: voiceId, name: targetName, category: existingVoice.category || 'generated', is_owner: true, method: '免费版云端改名合并' };
+      }
+    } catch (_) {}
+    return { voice_id: voiceId, name: targetName, category: existingVoice.category || 'generated', is_owner: true, method: '免费版现有音色同名合并' };
+  }
+
+  async function syncVoiceToSingleAccount(targetKey, targetName, voicePrompt, mode, autoReplaceSlot, sourceMeta, existingCustomVoices = []) {
+    const firstExistingCustom = Array.isArray(existingCustomVoices)
+      ? existingCustomVoices.find(v => v && v.voice_id && v.category !== 'premade')
+      : null;
+
+    if (mode === 'rename' && firstExistingCustom) {
+      return await renameExistingVoiceToTarget(targetKey, firstExistingCustom, targetName);
+    }
+
+    const quotaInfo = state.quotaListCache[targetKey];
+    const isKnownLowQuota = Boolean(quotaInfo && (quotaInfo.quotaState === 'quota' || (Number.isFinite(quotaInfo.left) && quotaInfo.left < 100)));
+    if (isKnownLowQuota && firstExistingCustom && mode !== 'clone') {
+      return await renameExistingVoiceToTarget(targetKey, firstExistingCustom, targetName);
+    }
+
     const attemptSyncOnce = async () => {
       // 阶段 1：如果是公开共享库声音且非强制 design，优先尝试公开库添加
       if (mode !== 'design' && sourceMeta && sourceMeta.sharing && sourceMeta.sharing.public_owner_id && (sourceMeta.sharing.original_voice_id || sourceMeta.voice_id)) {
@@ -5423,11 +5581,16 @@ document.addEventListener('DOMContentLoaded', () => {
               return { voice_id: ivcData.voice_id, name: targetName, category: 'cloned', is_owner: true, method: '原声样本克隆' };
             }
           } else if (mode === 'clone') {
-            throw await createApiError(ivcRes, '原声克隆失败（免费账号不支持 IVC，请切换为「智能自动兼容」或「免费版声音设计」）');
+            throw await createApiError(ivcRes, '原声克隆失败（免费账号不支持 IVC，请切换为「智能自动兼容」或「免费版极速改名合并」）');
           }
         } else if (mode === 'clone') {
-          throw new Error('未获取到源音色音频样本，请切换为「智能自动兼容」或「免费版声音设计」');
+          throw new Error('未获取到源音色音频样本，请切换为「智能自动兼容」或「免费版极速改名合并」');
         }
+      }
+
+      // 如果该账号已知 0 积分且没有任何现有自定义音色，直接快速跳过，避免在无积分账号上反复请求 Voice Design 预览
+      if (quotaInfo && (quotaInfo.quotaState === 'quota' || (Number.isFinite(quotaInfo.left) && quotaInfo.left <= 0))) {
+        throw new Error('该账号剩余积分为 0，已自动跳过新建预览');
       }
 
       // 阶段 3：免费版账号完美兼容 —— 使用官方 Voice Design API (/v1/text-to-voice) 创建同名自定义音色
@@ -5438,20 +5601,10 @@ document.addEventListener('DOMContentLoaded', () => {
       return await attemptSyncOnce();
     } catch (firstErr) {
       const errMsg = String(firstErr && firstErr.message || '');
-      const isLimitErr = /limit|maximum|slot|quota|too many voices|custom voices|已满|上限/i.test(errMsg) || firstErr.status === 400 || firstErr.status === 422;
-      if (autoReplaceSlot && isLimitErr) {
-        // 查询该账号当前自定义声音并删除 1 个非当前目标名称的旧自定义音色以腾出槽位
+      const isStrictSlotLimitErr = /voice_limit_reached|maximum number of custom voices|too many voices|custom voice limit|槽位已满/i.test(errMsg);
+      if (autoReplaceSlot && isStrictSlotLimitErr) {
         const lib = state.voiceLibraries.get(targetKey);
-        let currentVoices = (lib && Array.isArray(lib.voices)) ? lib.voices : [];
-        if (!currentVoices.length) {
-          try {
-            const vRes = await fetchWithTimeout('https://api.elevenlabs.io/v1/voices', { headers: { 'xi-api-key': targetKey } }, 10000);
-            if (vRes.ok) {
-              const vData = await vRes.json();
-              currentVoices = Array.isArray(vData && vData.voices) ? vData.voices : [];
-            }
-          } catch (_) {}
-        }
+        const currentVoices = (lib && Array.isArray(lib.voices)) ? lib.voices : existingCustomVoices;
         const removable = currentVoices.find(v => v && v.voice_id && v.category !== 'premade' && normalizeVoiceNameKey(v.name) !== normalizeVoiceNameKey(targetName));
         if (removable) {
           const delRes = await fetchWithTimeout(`https://api.elevenlabs.io/v1/voices/${encodeURIComponent(removable.voice_id)}`, {
@@ -5462,6 +5615,10 @@ document.addEventListener('DOMContentLoaded', () => {
             return await attemptSyncOnce();
           }
         }
+      }
+      // 免费版兜底绝招：如果新建失败（例如槽位已满 3/3、积分不足以生成预览、或权限限制），且该账号已有现成的自定义音色，则直接将该现有自定义音色改名合并为目标名称（0 积分、不删音色、100% 免费可用）
+      if (firstExistingCustom && mode !== 'clone') {
+        return await renameExistingVoiceToTarget(targetKey, firstExistingCustom, targetName);
       }
       throw firstErr;
     }
@@ -5517,16 +5674,18 @@ document.addEventListener('DOMContentLoaded', () => {
         setVoiceSyncStatus(`⏳ 正在为 [${r.alias}] (${i + 1}/${rows.length}) 同步音色「${targetName}」...`);
 
         try {
+          const existingCustomList = latestVoices.filter(v => v && v.voice_id && v.category !== 'premade');
           const created = await syncVoiceToSingleAccount(
             key,
             targetName,
             voicePrompt,
             mode,
             autoReplaceSlot,
-            state.lastSyncedSourceVoiceMeta || null
+            state.lastSyncedSourceVoiceMeta || null,
+            existingCustomList
           );
           const nextVoices = [
-            ...latestVoices.filter(v => v && normalizeVoiceNameKey(v.name) !== normalizeVoiceNameKey(targetName)),
+            ...latestVoices.filter(v => v && v.voice_id !== created.voice_id && normalizeVoiceNameKey(v.name) !== normalizeVoiceNameKey(targetName)),
             { voice_id: created.voice_id, name: targetName, category: created.category || 'generated', is_owner: true }
           ];
           setVoiceLibrary(key, {
@@ -5549,6 +5708,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       ensureVoiceFamilies();
+      state.voiceAccessCache.clear();
+      const nonVoiceSkips = state.generationSkips.values().filter(r => r && r.scope !== 'voice');
+      state.generationSkips = new ElevenApiPool.GenerationSkips(nonVoiceSkips);
+      scheduleQuotaSave();
       const targetFamilyId = 'own:' + encodeURIComponent(targetName);
       if (state.voiceFamilies.has(targetFamilyId)) {
         preferredVoice = targetFamilyId;
