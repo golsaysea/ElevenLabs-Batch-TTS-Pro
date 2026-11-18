@@ -1005,10 +1005,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const timer = setTimeout(() => controller.abort(), timeout);
     try { return await fetch(url, { ...options, signal: controller.signal }); }
     catch (error) {
-      const failure = new Error(error.message || '查询请求未成功');
+      const isTimeout = error.name === 'AbortError' || /signal is aborted|aborted without reason/i.test(error.message || '');
+      const failure = new Error(isTimeout ? '请求超时，请检查网络或代理连接' : (error.message || '查询请求未成功'));
       failure.name = error.name || 'Error';
-      failure.code = error.name === 'AbortError' ? 'query_timeout' : 'query_network_error';
-      failure.timeoutMs = error.name === 'AbortError' ? timeout : 0;
+      failure.code = isTimeout ? 'query_timeout' : 'query_network_error';
+      failure.timeoutMs = isTimeout ? timeout : 0;
       throw failure;
     }
     finally { clearTimeout(timer); }
@@ -1874,16 +1875,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const requestId = ++modelRequestId;
     modelLoading = true;
     ui.refreshModels.disabled = true;
+    let hasLocalModels = Array.isArray(state.modelList) && state.modelList.length > 0;
     try {
       const cached = await new Promise(r => chrome.storage.local.get(['models_cache'], res => r(res.models_cache)));
       if (key !== state.currentKey || requestId !== modelRequestId) return;
       const now = Date.now();
       if (!force && cached && Array.isArray(cached.data) && (!cached.key || cached.key === key) && (now - cached.ts < 86400000)) {
         renderModels(cached.data, savedModelId);
+        hasLocalModels = true;
       }
       await fetchModelsFromApi(key, savedModelId, requestId);
     } catch (e) {
-      if (key === state.currentKey && requestId === modelRequestId) setStatus('模型列表加载失败：' + e.message, 'error');
+      if (key === state.currentKey && requestId === modelRequestId) {
+        const isAbort = e && (e.name === 'AbortError' || /signal is aborted|aborted without reason|timeout/i.test(e.message || ''));
+        if (isAbort && !force && hasLocalModels) {
+          setStatus('网络响应较慢，已加载本地内置/缓存模型列表（可直接正常生成）');
+        } else {
+          const friendly = isAbort ? '请求超时（网络或代理较慢），已保留本地内置模型列表' : (e && e.message || '网络异常');
+          setStatus('模型列表加载提示：' + friendly, force ? 'error' : 'normal');
+        }
+      }
     } finally {
       if (requestId === modelRequestId) {
         modelLoading = false;
@@ -1895,7 +1906,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function fetchModelsFromApi(key, savedModelId, requestId) {
     const selectedAtStart = ui.model.value;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
+    const timer = setTimeout(() => controller.abort(), 45000);
     try {
       const res = await fetch('https://api.elevenlabs.io/v1/models', { headers: { 'xi-api-key': key }, signal: controller.signal });
       if (key !== state.currentKey || requestId !== modelRequestId) return;
