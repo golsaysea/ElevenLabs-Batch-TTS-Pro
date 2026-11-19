@@ -44,9 +44,11 @@ jobs:
             "SECURITY-ARTIFACTS.md"
           )
 
+          $proVer = (Get-Content -Raw -Encoding UTF8 "packages/elevenlabs-batch-pro/manifest.json" | ConvertFrom-Json).version
+          $stdVer = (Get-Content -Raw -Encoding UTF8 "packages/elevenlabs-batch-standard/manifest.json" | ConvertFrom-Json).version
           $assets = @(
-            @{ Name = "elevenlabs-batch-pro-v8.0.2"; Path = "packages/elevenlabs-batch-pro" },
-            @{ Name = "elevenlabs-batch-standard-v6.9.1"; Path = "packages/elevenlabs-batch-standard" }
+            @{ Name = "elevenlabs-batch-pro-v$proVer"; Path = "packages/elevenlabs-batch-pro" },
+            @{ Name = "elevenlabs-batch-standard-v$stdVer"; Path = "packages/elevenlabs-batch-standard" }
           )
 
           foreach ($asset in $assets) {
@@ -81,6 +83,8 @@ jobs:
             "$hash  $($_.Name)"
           } | Set-Content -LiteralPath (Join-Path $dist "SHA256SUMS.txt") -Encoding utf8NoBOM
 
+          $proVer = (Get-Content -Raw -Encoding UTF8 "packages/elevenlabs-batch-pro/manifest.json" | ConvertFrom-Json).version
+          $stdVer = (Get-Content -Raw -Encoding UTF8 "packages/elevenlabs-batch-standard/manifest.json" | ConvertFrom-Json).version
           $created = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           $namespaceCommit = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { "manual" }
           $sbom = [ordered]@{
@@ -95,9 +99,9 @@ jobs:
             }
             packages = @(
               [ordered]@{
-                name = "elevenlabs-batch-pro-v8.0.2"
+                name = "elevenlabs-batch-pro-v$proVer"
                 SPDXID = "SPDXRef-Package-1"
-                versionInfo = "v8.0.2"
+                versionInfo = "v$proVer"
                 downloadLocation = "https://github.com/$env:GITHUB_REPOSITORY"
                 filesAnalyzed = $false
                 licenseConcluded = "GPL-3.0-only"
@@ -105,9 +109,9 @@ jobs:
                 copyrightText = "NOASSERTION"
               },
               [ordered]@{
-                name = "elevenlabs-batch-standard-v6.9.1"
+                name = "elevenlabs-batch-standard-v$stdVer"
                 SPDXID = "SPDXRef-Package-2"
-                versionInfo = "v8.0.2"
+                versionInfo = "v$stdVer"
                 downloadLocation = "https://github.com/$env:GITHUB_REPOSITORY"
                 filesAnalyzed = $false
                 licenseConcluded = "GPL-3.0-only"
