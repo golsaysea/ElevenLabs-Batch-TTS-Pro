@@ -4,8 +4,8 @@ Chrome Manifest V3 扩展程序：支持 ElevenLabs 批量语音合成 (TTS)、*
 
 ## 包含版本 (Packages)
 
-- `packages/elevenlabs-batch-pro` — **多账号 API 池智能负载均衡版** (`v8.0.2`)
-- `packages/elevenlabs-batch-standard` — **经典多 Key 标准版** (`v6.9.1`)
+- `packages/elevenlabs-batch-pro` — **多账号 API 池智能负载均衡版** (`v8.0.3`)
+- `packages/elevenlabs-batch-standard` — **经典多 Key 标准版** (`v6.9.2`)
 
 ## 核心功能亮点 (Key Features)
 

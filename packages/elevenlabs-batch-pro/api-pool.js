@@ -34,7 +34,9 @@
   function classifyError(error = {}) {
     if (error.kind) return error.kind;
     const status = Number(error.status || 0);
-    const text = `${error.code || ''} ${error.rawMessage || ''} ${error.message || ''}`.toLowerCase();
+    const code = String(error.code || '').toLowerCase();
+    const text = `${code} ${error.rawMessage || ''} ${error.message || ''}`.toLowerCase();
+    if (code === 'invalid_api_key_format' || (!status && /bytestring|invalid value.*headers|headers.*invalid value|iso-8859-1/.test(text))) return 'key';
     // A failed POST with no definitive rejection may already have been billed.
     if (!status || status >= 500) return 'uncertain';
     if (/unusual_activity|abuse|suspicious/.test(text)) return 'policy';
@@ -88,8 +90,8 @@
       const kind = classifyError(error);
       const { key, voice = '', model = '', format = '', cost } = context;
       if (typeof key !== 'string' || !key) return null;
-      let scope = kind;
-      if (kind === 'access') {
+      let scope = error.skipScope || kind;
+      if (scope === 'access') {
         const code = String(error.code || '').toLowerCase();
         const text = `${error.rawMessage || ''} ${error.message || ''}`.toLowerCase();
         scope = /^voice_/.test(code) ? 'voice' : /^model_|unsupported_model/.test(code) ? 'model' :
@@ -100,7 +102,8 @@
       if (scope === 'format' && !format) return null;
       if (scope === 'quota' && (!Number.isFinite(cost) || cost < 1)) return null;
       const retry = Number(error.retryAfterMs);
-      const until = scope === 'quota' ? now + 300000 : scope === 'rate' ? now + Math.max(30000, Number.isFinite(retry) ? Math.max(0, retry) : 0) : scope === 'uncertain' ? now + 60000 : 0;
+      // Keep unreachable/uncertain accounts skipped for 12 hours instead of 60s so Continue/Retry skips broken nodes.
+      const until = scope === 'quota' ? now + 300000 : scope === 'rate' ? now + Math.max(30000, Number.isFinite(retry) ? Math.max(0, retry) : 0) : scope === 'uncertain' ? now + 43200000 : 0;
       const exactRem = scope === 'quota' ? extractRemainingCredits(error) : null;
       const quotaCeiling = scope === 'quota'
         ? (Number.isFinite(exactRem) ? Math.min(cost - 1, Math.max(0, exactRem)) : cost - 1)
@@ -129,6 +132,30 @@
         if (!result.record) result.record = record;
       }
       return result;
+    }
+
+    markManual(key, message = '已手动跳过此账号，暂不参与生成', now = Date.now()) {
+      if (typeof key !== 'string' || !key) return null;
+      const record = {
+        key, scope: 'key', voice: '', model: '', format: '',
+        ts: now, until: 0, ceiling: undefined, httpStatus: 0,
+        code: 'manual_skip',
+        message: String(message || '已手动跳过此账号，暂不参与生成').split(key).join('[Key]').slice(0, 500)
+      };
+      this.records.set(this.id(record), record);
+      return record;
+    }
+
+    clearKey(key) {
+      if (typeof key !== 'string' || !key) return false;
+      let removed = false;
+      for (const [id, record] of this.records) {
+        if (record.key === key) {
+          this.records.delete(id);
+          removed = true;
+        }
+      }
+      return removed;
     }
 
     values(now = Date.now()) {
@@ -513,6 +540,7 @@
         account.readyAt = Math.max(account.readyAt, readyAt);
         return { ...item, account, busy: false, uses: 0, disabled: Boolean(item.disabled),
           ceiling: Number.isFinite(item.ceiling) ? Math.max(0, item.ceiling) : Infinity, readyAt,
+          healthRank: Number.isFinite(item.healthRank) ? item.healthRank : 0,
           priorityRank: Number.isFinite(item.priorityRank) ? item.priorityRank : 0,
           priorityCoverage: Number.isFinite(item.priorityCoverage) ? item.priorityCoverage : 0,
           priorityReserved: Number.isFinite(item.priorityReserved) ? item.priorityReserved : 0 };
@@ -529,7 +557,7 @@
       const hasKnownSufficient = entry => (Number.isFinite(entry.account.remaining) && entry.account.remaining >= cost) ? 0 : 1;
       const available = this.candidates(cost, tried)
         .filter(entry => Math.max(entry.readyAt, entry.account.readyAt) <= Date.now())
-        .sort((a, b) => comparePriority(a, b) || hasKnownSufficient(a) - hasKnownSufficient(b) || a.uses - b.uses || (b.account.remaining ?? -1) - (a.account.remaining ?? -1));
+        .sort((a, b) => comparePriority(a, b) || a.healthRank - b.healthRank || hasKnownSufficient(a) - hasKnownSufficient(b) || a.uses - b.uses || (b.account.remaining ?? -1) - (a.account.remaining ?? -1));
       const best = available[0];
       // Busy preferred accounts are not exhausted: wait instead of spending protected credits.
       const entry = best && available.find(item => !item.busy && !item.account.busy && comparePriority(item, best) === 0);
@@ -575,7 +603,14 @@
     async function processTask(task) {
       const cost = options.estimate(task.text);
       const tried = new Set();
+      const formatEntryLabel = item => {
+        if (!item) return '';
+        const alias = String(item.alias || '').trim();
+        const tail = item.key ? `••••${String(item.key).slice(-4)}` : '';
+        return alias && tail ? `${alias} (${tail})` : alias || tail;
+      };
       let lastMessage = '';
+      let lastAccountLabel = '';
       while (!stopped()) {
         const entry = pool.acquire(cost, tried);
         if (!entry) {
@@ -584,8 +619,25 @@
             await sleep(150);
             continue;
           }
-          const savedReason = pool.entries.find(item => item.disabled && item.skipReason)?.skipReason;
-          emit(task, 'failed', null, lastMessage || [`没有可用 API 能承接这段文案（预计 ${cost} credits）`, savedReason].filter(Boolean).join('\n'));
+          const skippedNotes = [];
+          const seenNotes = new Set();
+          for (const item of pool.entries) {
+            if (!item.disabled || !item.skipReason) continue;
+            if (!seenNotes.has(item.skipReason)) {
+              seenNotes.add(item.skipReason);
+              skippedNotes.push(item.skipReason);
+            }
+            if (skippedNotes.length >= 3) break;
+          }
+          const primaryError = lastAccountLabel && lastMessage && !lastMessage.includes(lastAccountLabel)
+            ? `【最后出错账号：${lastAccountLabel}】${lastMessage}`
+            : lastMessage;
+          const summary = [
+            primaryError,
+            `没有可用 API 能承接这段文案（预计 ${cost} credits）`,
+            ...skippedNotes
+          ].filter(Boolean).join('\n');
+          emit(task, 'failed', null, summary);
           return;
         }
         let charged = false;
@@ -617,7 +669,11 @@
           return;
         } catch (error) {
           const kind = charged ? 'download' : classifyError(error);
+          lastAccountLabel = formatEntryLabel(entry);
           lastMessage = error.message || '请求失败';
+          const attributedError = lastAccountLabel && !lastMessage.includes(lastAccountLabel)
+            ? `【出错账号：${lastAccountLabel}】${lastMessage}`
+            : lastMessage;
           if (kind === 'quota') {
             entry.quotaStrikes = (entry.quotaStrikes || 0) + 1;
             const exactRem = extractRemainingCredits(error);
@@ -634,7 +690,7 @@
             tried.add(entry.key);
           } else if (kind === 'key' || kind === 'access' || kind === 'format') {
             entry.disabled = true;
-            entry.skipReason = lastMessage;
+            entry.skipReason = attributedError;
             tried.add(entry.key);
           } else if (kind === 'rate') {
             const delay = Number(error.retryAfterMs);
@@ -644,17 +700,22 @@
           } else {
             if (kind === 'uncertain') {
               pool.debit(entry, cost);
-              for (const sibling of pool.entries) if (sibling.account === entry.account) sibling.disabled = true;
+              for (const sibling of pool.entries) {
+                if (sibling.account === entry.account) {
+                  sibling.disabled = true;
+                  if (!sibling.skipReason) sibling.skipReason = attributedError;
+                }
+              }
               if (options.onSkip) options.onSkip(entry, error, kind, cost);
               if (options.onQuota) options.onQuota(pool, entry);
             }
-            emit(task, kind === 'download' ? 'download_failed' : kind === 'uncertain' ? 'uncertain' : 'failed', entry, lastMessage);
-            if (options.onFatal && kind === 'policy') options.onFatal(kind, lastMessage);
+            emit(task, kind === 'download' ? 'download_failed' : kind === 'uncertain' ? 'uncertain' : 'failed', entry, attributedError);
+            if (options.onFatal && kind === 'policy') options.onFatal(kind, attributedError);
             return;
           }
           if (options.onSkip) options.onSkip(entry, error, kind, cost);
           if (options.onQuota) options.onQuota(pool, entry);
-          emit(task, 'waiting', entry, `切换 API：${lastMessage}`);
+          emit(task, 'waiting', entry, lastAccountLabel ? `切换 API（已跳过 ${lastAccountLabel}：${lastMessage}）` : `切换 API：${lastMessage}`);
         } finally {
           pool.release(entry);
         }

@@ -3,6 +3,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 1. 基础工具与 UI 元素定义
   // ==========================================
   const getEl = (id) => document.getElementById(id);
+  let showProblemKeysOnly = false;
 
   // 集中定义 UI 元素，使用安全获取方式
   const ui = {
@@ -77,6 +78,8 @@ document.addEventListener('DOMContentLoaded', () => {
     keyList: getEl('keyListContainer'),
     keySearch: getEl('keySearch'),
     refreshKeysBtn: getEl('refreshKeysBtn'),
+    renameKeysSequentialBtn: getEl('renameKeysSequentialBtn'),
+    filterProblemKeysBtn: getEl('filterProblemKeysBtn'),
     cleanupKeysBtn: getEl('cleanupKeysBtn'),
     cleanupUserRead: getEl('cleanupUserRead'),
     resetGenerationSkipsBtn: getEl('resetGenerationSkipsBtn'),
@@ -1005,10 +1008,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const timer = setTimeout(() => controller.abort(), timeout);
     try { return await fetch(url, { ...options, signal: controller.signal }); }
     catch (error) {
-      const isTimeout = error.name === 'AbortError' || /signal is aborted|aborted without reason/i.test(error.message || '');
-      const failure = new Error(isTimeout ? '请求超时，请检查网络或代理连接' : (error.message || '查询请求未成功'));
+      const msg = String(error?.message || '');
+      const isBadHeaderKey = /bytestring|invalid value.*headers|headers.*invalid value|iso-8859-1/i.test(msg);
+      const isTimeout = error.name === 'AbortError' || /signal is aborted|aborted without reason/i.test(msg);
+      const failure = new Error(isBadHeaderKey ? 'API Key 含有无效字符或空格，无法建立连接' : isTimeout ? '请求超时，请检查网络或代理连接' : (msg || '查询请求未成功'));
       failure.name = error.name || 'Error';
-      failure.code = isTimeout ? 'query_timeout' : 'query_network_error';
+      if (isBadHeaderKey) {
+        failure.status = 400;
+        failure.code = 'invalid_api_key_format';
+      } else {
+        failure.code = isTimeout ? 'query_timeout' : 'query_network_error';
+      }
       failure.timeoutMs = isTimeout ? timeout : 0;
       throw failure;
     }
@@ -1056,6 +1066,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const attempts = [];
       let accountId = cached?.accountId || '';
       try {
+        if (/[^\x21-\x7e]/.test(String(key || ''))) {
+          throw Object.assign(new Error('API Key 含有无效字符或空格，无法建立连接'), { status: 400, code: 'invalid_api_key_format' });
+        }
         const headers = { 'xi-api-key': key };
         let res = await fetchWithTimeout('https://api.elevenlabs.io/v1/user', { headers });
         let result;
@@ -1111,6 +1124,54 @@ document.addEventListener('DOMContentLoaded', () => {
     const retryAfter = resp.headers.get('retry-after');
     error.retryAfterMs = retryAfter ? (Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : Math.max(0, Date.parse(retryAfter) - Date.now())) : 0;
     return error;
+  }
+
+  /** Preflight check shared by batch generation and single-card preview. */
+  async function preflightAccountEntry(entry, text, model, poolInstance) {
+    const aliasLabel = `${entry.alias || '未命名账号'} (••••${String(entry.key || '').slice(-4)})`;
+    if (/[^\x21-\x7e]/.test(String(entry.key || ''))) {
+      throw Object.assign(new Error(`【${aliasLabel}】API Key 含有无效字符或空格，无法建立连接`), {
+        status: 400, kind: 'key', code: 'invalid_api_key_format'
+      });
+    }
+    let info = state.quotaListCache[entry.key];
+    const recentPermissionSkip = Boolean(info && info.quotaState === 'permission' && Number.isFinite(info.ts) && Date.now() - info.ts < 1800000);
+    const knownExhaustedSkip = Boolean(info && !info.needsQuotaRefresh && Number.isFinite(info.left) && info.left <= 0 &&
+      Number.isFinite(info.ts) && info.ts <= Date.now() && (!info.resetUnix || info.resetUnix * 1000 > Date.now()));
+    let fetchedNow = false;
+    if (!ElevenVoiceIndex.freshQuota(info) && !recentPermissionSkip && !knownExhaustedSkip) {
+      info = await getQuotaInfo(entry.key);
+      fetchedNow = true;
+    }
+    info = state.quotaListCache[entry.key] || info;
+    if (!info) return;
+    if (info.disabled) throw Object.assign(new Error(info.message || 'API 不可用'), {
+      preflight: true, status: info.httpStatus || (info.invalid ? 401 : 403), code: info.errorCode || (info.invalid ? 'invalid_api_key' : 'workspace_access_denied')
+    });
+    if (info.quotaState === 'quota') {
+      entry.account.remaining = 0;
+      entry.ceiling = 0;
+      throw Object.assign(new Error('当前账号额度受限 (You have 0 credits remaining)'), { preflight: true, status: 401, code: 'quota_exceeded' });
+    }
+    const requiredCost = ElevenApiPool.estimateCost(text, model);
+    if (fetchedNow && info.quotaState === 'network' && !info.httpStatus) {
+      const hasOther = poolInstance && poolInstance.entries.some(other =>
+        other.key !== entry.key && !other.disabled && other.ceiling >= requiredCost &&
+        (other.account.remaining === null || other.account.remaining >= requiredCost)
+      );
+      if (hasOther) {
+        throw Object.assign(new Error(info.message || '网络预检无法连接 ElevenLabs，已自动跳过此账号 12 小时'), {
+          kind: 'key', skipScope: 'uncertain', code: 'preflight_network_unreachable'
+        });
+      }
+    }
+    if (Number.isFinite(info.left)) {
+      entry.account.remaining = info.left;
+      if (info.left < requiredCost) {
+        entry.ceiling = Math.min(entry.ceiling, Math.max(0, info.left));
+        throw Object.assign(new Error(`当前账号额度不足 (You have ${info.left} credits remaining)`), { preflight: true, status: 401, code: 'quota_exceeded' });
+      }
+    }
   }
 
   function lockBatch(locked) {
@@ -1200,9 +1261,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.batchRunning || state.keyMaintenance) return;
     if (!getPoolKeys().length) return showError('请在设置中导入 API Key。');
     const cards = Array.from(ui.container.querySelectorAll('.card'));
-    batchJobs = cards.map((card, index) => ({ card, index: card.taskData.index || index + 1, text: card.querySelector('textarea').value.trim() }))
-      .filter(job => job.text && ['pending', 'failed'].includes(job.card.dataset.status));
-    if (!batchJobs.length) return showError('没有待生成文案。');
+    const allJobCards = cards.map((card, index) => ({ card, index: card.taskData.index || index + 1, text: card.querySelector('textarea').value.trim() }));
+    batchJobs = allJobCards.filter(job => job.text && ['pending', 'failed'].includes(job.card.dataset.status));
+    if (!batchJobs.length) {
+      const uncertainCards = allJobCards.filter(job => job.text && job.card.dataset.status === 'uncertain');
+      if (uncertainCards.length) {
+        const failedNames = [...new Set(uncertainCards.map(job => job.card.taskData.account).filter(Boolean))];
+        const accountHint = failedNames.length ? `（上次出错账号：${failedNames.join('、')}）` : '';
+        return showError(`没有待生成文案，但有 ${uncertainCards.length} 段处于「待确认」状态${accountHint}。\n\n为防止重复扣费，程序已跳过出错账号并暂停自动重发；\n请先确认是否已生成，再点文案右上角「重新生成」后继续，或在「全局设置」搜索该账号名称删除/检查。`);
+      }
+      return showError('没有待生成文案。');
+    }
     const voice = selectedVoiceId();
     const routes = getVoiceRoutes(voice);
     if (!routes.size) return showError('请选择已汇总的声音，或输入有效 Voice ID。');
@@ -1283,6 +1352,7 @@ document.addEventListener('DOMContentLoaded', () => {
             disabled: Boolean(fresh && info.disabled) || limits.disabled || priority.blocked,
             ceiling: quotaBlocked || knownZero ? 0 : limits.ceiling,
             readyAt: limits.readyAt,
+            healthRank: info.quotaState === 'ok' ? 0 : (info.quotaState === 'network' || info.quotaState === 'unknown') ? 2 : 1,
             priorityRank: isFallbackVoice ? 3 : priority.rank,
             priorityCoverage: priority.coverage,
             priorityReserved: priority.reserved,
@@ -1310,31 +1380,7 @@ document.addEventListener('DOMContentLoaded', () => {
         concurrency: state.concurrency, stopped: () => state.pauseRequested,
         estimate: text => ElevenApiPool.estimateCost(text, model),
         generate: async (job, entry) => {
-          let info = state.quotaListCache[entry.key];
-          const recentPermissionSkip = Boolean(info && info.quotaState === 'permission' && Number.isFinite(info.ts) && Date.now() - info.ts < 1800000);
-          const knownExhaustedSkip = Boolean(info && !info.needsQuotaRefresh && Number.isFinite(info.left) && info.left <= 0 &&
-            Number.isFinite(info.ts) && info.ts <= Date.now() && (!info.resetUnix || info.resetUnix * 1000 > Date.now()));
-          if (!ElevenVoiceIndex.freshQuota(info) && !recentPermissionSkip && !knownExhaustedSkip) {
-            info = await getQuotaInfo(entry.key);
-          }
-          info = state.quotaListCache[entry.key] || info;
-          if (info) {
-            if (info.disabled) throw Object.assign(new Error(info.message || 'API 不可用'), {
-              preflight: true, status: info.httpStatus || (info.invalid ? 401 : 403), code: info.errorCode || (info.invalid ? 'invalid_api_key' : 'workspace_access_denied') });
-            if (info.quotaState === 'quota') {
-              entry.account.remaining = 0;
-              entry.ceiling = 0;
-              throw Object.assign(new Error('当前账号额度受限 (You have 0 credits remaining)'), { preflight: true, status: 401, code: 'quota_exceeded' });
-            }
-            if (Number.isFinite(info.left)) {
-              entry.account.remaining = info.left;
-              const requiredCost = ElevenApiPool.estimateCost(job.text, model);
-              if (info.left < requiredCost) {
-                entry.ceiling = Math.min(entry.ceiling, Math.max(0, info.left));
-                throw Object.assign(new Error(`当前账号额度不足 (You have ${info.left} credits remaining)`), { preflight: true, status: 401, code: 'quota_exceeded' });
-              }
-            }
-          }
+          await preflightAccountEntry(entry, job.text, model, activePool);
           if (entry.voiceId === '__auto_discover__') {
             const lib = await getVoiceLibrary(entry.key).catch(() => null);
             const voices = (lib && Array.isArray(lib.voices)) ? lib.voices : [];
@@ -1344,6 +1390,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const fallbackAny = voices.find(v => v && v.voice_id);
             const chosen = exact || personal || fallbackAny;
             if (!chosen) {
+              if (lib && lib.error && !lib.httpStatus) {
+                throw Object.assign(new Error(lib.error || '查询声音库失败，无法连接'), { kind: 'key', skipScope: 'uncertain', code: 'preflight_network_unreachable' });
+              }
               throw Object.assign(new Error('此账号声音库中未找到可用音色'), { status: 404, code: 'voice_not_found' });
             }
             entry.voiceId = chosen.voice_id;
@@ -1407,12 +1456,21 @@ document.addEventListener('DOMContentLoaded', () => {
       updateBatchProgress();
       renderPoolControls();
       saveCards();
+      const problemCards = batchJobs.filter(job => ['failed', 'uncertain', 'download_failed'].includes(job.card.dataset.status));
+      const problemAccounts = [...new Set(problemCards.map(job => job.card.taskData.account).filter(Boolean))];
+      const problemHint = problemAccounts.length ? `（出错账号：${problemAccounts.join('、')}，已自动跳过，可点⚙️搜索名称检查或删除）` : '';
       if (!snapshotSaved) setStatus('跳过标记/额度缓存保存失败，当前窗口已保留；请暂勿刷新', 'error');
-      else setStatus(state.pauseRequested ? '已暂停，可继续未完成文案' : ui.batchProgress.textContent);
+      else if (state.pauseRequested) setStatus(`已暂停，可继续未完成文案${problemHint}`);
+      else setStatus(ui.batchProgress.textContent + problemHint, problemCards.length ? 'error' : undefined);
     }
   });
 
   async function generate(text, cfg) {
+    if (/[^\x21-\x7e]/.test(String(cfg.key || ''))) {
+      throw Object.assign(new Error('API Key 含有无效字符或空格，无法建立连接。请打开设置搜索该账号并检查或删除。'), {
+        status: 400, kind: 'key', code: 'invalid_api_key_format'
+      });
+    }
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${cfg.voice}?output_format=${cfg.apiFormat}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 180000);
@@ -1459,7 +1517,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (cfg.apiFormat.startsWith('pcm')) outputBlob = wrapPcmAsWav(await blob.arrayBuffer(), Number(cfg.apiFormat.split('_')[1]));
     return { blob: outputBlob, cost: header !== null && Number.isFinite(Number(header)) ? Number(header) : null };
     } catch (error) {
-      if (!error.status) { error.kind = 'uncertain'; error.message = '网络中断或生成超时，结果待确认。请先检查 ElevenLabs 历史记录，再手动重试。'; }
+      if (!error.status && !error.kind) {
+        const msg = String(error?.message || '');
+        if (/bytestring|invalid value.*headers|headers.*invalid value|iso-8859-1/i.test(msg)) {
+          error.kind = 'key';
+          error.code = 'invalid_api_key_format';
+          error.message = 'API Key 含有无效字符或空格，无法建立连接。请检查或删除此账号。';
+        } else {
+          error.kind = 'uncertain';
+          error.message = '网络中断或生成超时，结果待确认。此账号已自动跳过 12 小时，请先检查 ElevenLabs 历史记录，再点「重新生成」或去设置检查删除。';
+        }
+      }
       throw error;
     } finally { clearTimeout(timer); }
   }
@@ -2028,9 +2096,11 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const control of [ui.importKeysBtn, ui.keyFileInput, ui.importBtn, ui.fileInput, ui.addKeyBtn,
       ui.newAlias, ui.newKey, ui.quickKeyInput, ui.quickKeyBtn]) control.disabled = busy;
     ui.cleanupKeysBtn.disabled = busy || !getPoolKeys().length;
+    if (ui.renameKeysSequentialBtn) ui.renameKeysSequentialBtn.disabled = busy || !state.keys.length;
+    if (ui.filterProblemKeysBtn) ui.filterProblemKeysBtn.disabled = busy || !state.keys.length;
     ui.cleanupUserRead.disabled = busy;
     ui.voicePriorityPolicy.disabled = busy;
-    for (const button of ui.keyList.querySelectorAll('.query-retry-btn')) button.disabled = busy;
+    for (const button of ui.keyList.querySelectorAll('.query-retry-btn, .skip-toggle-btn')) button.disabled = busy;
     renderGenerationSkips();
     ui.undoKeyCleanupBtn.disabled = busy || !state.cleanupBackup || Boolean(state.cleanupBackup.restored_at);
     ui.refreshKeysBtn.disabled = busy;
@@ -2117,7 +2187,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function generationDiagnostic(record) {
     if (!record) return '';
-    const labels = { key: '生成权限/密钥不可用', voice: '此声音不可生成', model: '此模型不可生成', route: '此声音/模型组合不可生成', format: '此输出格式套餐不支持（' + record.format + '）', quota: '生成额度受限', rate: '生成限流，暂避', uncertain: '生成结果待确认，暂避' };
+    if (record.code === 'manual_skip') return `已手动跳过 · ${record.message || '暂不参与生成'}（点右侧「恢复」可重新启用）`;
+    const labels = { key: '生成权限/密钥不可用', voice: '此声音不可生成', model: '此模型不可生成', route: '此声音/模型组合不可生成', format: '此输出格式套餐不支持（' + record.format + '）', quota: '生成额度受限', rate: '生成限流，暂避', uncertain: '生成结果待确认/连接异常，暂避 12 小时' };
     return [labels[record.scope], record.httpStatus ? 'HTTP ' + record.httpStatus : '', record.code, record.message].filter(Boolean).join(' · ');
   }
 
@@ -2130,6 +2201,15 @@ document.addEventListener('DOMContentLoaded', () => {
     for (const row of ui.keyList.querySelectorAll('.key-item[data-key]')) {
       const record = state.generationSkips.limits(row.dataset.key, routes.get(row.dataset.key), ui.model.value, selectedOutputFormat()).record;
       row.querySelector('.generation-diagnostic').textContent = generationDiagnostic(record);
+      const skipped = Boolean(record);
+      row.classList.toggle('key-skipped', skipped);
+      const skipBtn = row.querySelector('.skip-toggle-btn');
+      if (skipBtn) {
+        skipBtn.textContent = skipped ? '恢复' : '跳过';
+        skipBtn.classList.toggle('is-skipped', skipped);
+        skipBtn.title = skipped ? '解除跳过，恢复此账号参与生成' : '手动跳过此账号，暂不参与生成';
+        skipBtn.setAttribute('aria-label', `${row.dataset.alias || ''} ${skipBtn.title}`.trim());
+      }
     }
   }
 
@@ -2248,21 +2328,72 @@ document.addEventListener('DOMContentLoaded', () => {
     try { await scanPool(true); renderKeyList(); }
     finally { ui.refreshKeysBtn.disabled = state.batchRunning; }
   });
+  if (ui.renameKeysSequentialBtn) {
+    ui.renameKeysSequentialBtn.addEventListener('click', () => {
+      if (state.batchRunning || state.keyMaintenance || !state.keys.length) return;
+      if (!confirm(`确认按当前顺序将全部 ${state.keys.length} 个 API 账号依次重命名为「账号 1」到「账号 ${state.keys.length}」？\n仅修改本地备注名，不会改动 API Key 或额度。`)) return;
+      state.keys = state.keys.map((item, idx) => ({ ...item, alias: `账号 ${idx + 1}` }));
+      saveKeyList();
+      updateAccountStatus();
+      renderKeyList();
+      renderPoolControls();
+      if (ui.accountDropdown && !ui.accountDropdown.classList.contains('hidden')) renderQuickDropdown();
+      if (ui.keyCleanupStatus) ui.keyCleanupStatus.textContent = `已按顺序重命名为 账号 1 ～ 账号 ${state.keys.length}。`;
+      setStatus(`已按顺序重命名全部 ${state.keys.length} 个 API`);
+    });
+  }
+  if (ui.filterProblemKeysBtn) {
+    ui.filterProblemKeysBtn.addEventListener('click', () => {
+      showProblemKeysOnly = !showProblemKeysOnly;
+      ui.filterProblemKeysBtn.classList.toggle('active-filter', showProblemKeysOnly);
+      ui.filterProblemKeysBtn.setAttribute('aria-pressed', String(showProblemKeysOnly));
+      state.keyPage = 0;
+      renderKeyList();
+    });
+  }
 
-  function getFilteredKeys(query = '') {
-    const search = query.trim().toLowerCase();
-    return state.keys.map((item, idx) => ({ item, idx }))
-      .filter(({ item }) => !search || `${item.alias} ${item.key.slice(-4)}`.toLowerCase().includes(search));
+  function isProblemKey(item, routes = getVoiceRoutes()) {
+    const key = item && item.key;
+    if (!key) return false;
+    const record = state.generationSkips.limits(key, routes.get(key), ui.model.value, selectedOutputFormat()).record;
+    if (record) return true;
+    const info = state.quotaListCache[key];
+    return Boolean(info && (
+      info.disabled || info.invalid ||
+      ['network', 'invalid', 'restricted', 'permission', 'quota', 'rate'].includes(info.quotaState) ||
+      (Number.isFinite(info.left) && info.left <= 0)
+    ));
+  }
+
+  function getFilteredKeys(query = '', onlyProblems = false) {
+    const rawSearch = String(query || '').trim().toLowerCase();
+    const compactSearch = rawSearch.replace(/\s+/g, '');
+    const routes = (onlyProblems || compactSearch) ? getVoiceRoutes() : null;
+    const problemHintTerms = rawSearch ? /(异常|跳过|暂停|连接|超时|失败|待确认|用尽|无效|权限|限流)/i.test(rawSearch) : false;
+    return state.keys.map((item, idx) => ({ item, idx })).filter(({ item, idx }) => {
+      if (onlyProblems && !isProblemKey(item, routes)) return false;
+      if (!compactSearch) return true;
+      const alias = String(item.alias || '').toLowerCase();
+      const compactAlias = alias.replace(/\s+/g, '');
+      const tail = String(item.key || '').slice(-4).toLowerCase();
+      if (alias.includes(rawSearch) || compactAlias.includes(compactSearch) || tail.includes(compactSearch) || `#${idx + 1}` === compactSearch) {
+        return true;
+      }
+      if (!problemHintTerms && !isProblemKey(item, routes)) return false;
+      const record = state.generationSkips.limits(item.key, routes.get(item.key), ui.model.value, selectedOutputFormat()).record;
+      const diag = `${generationDiagnostic(record)} ${ElevenApiKeys.queryDiagnostic(state.quotaListCache[item.key], 'quota', item.key)}`.toLowerCase();
+      return diag.includes(rawSearch) || diag.replace(/\s+/g, '').includes(compactSearch);
+    });
   }
 
   function renderKeyList() {
     if (!ui.keyList) return;
     syncKeyMaintenanceControls();
-    const matches = getFilteredKeys(ui.keySearch.value);
+    const matches = getFilteredKeys(ui.keySearch.value, showProblemKeysOnly);
     const pages = Math.max(1, Math.ceil(matches.length / KEY_PAGE_SIZE));
     state.keyPage = Math.max(0, Math.min(pages - 1, state.keyPage));
     ui.keyPageInfo.textContent = `${state.keyPage + 1} / ${pages}`;
-    ui.keyListCount.textContent = `${matches.length.toLocaleString()} 个 API`;
+    ui.keyListCount.textContent = showProblemKeysOnly ? `${matches.length.toLocaleString()} 个异常 API` : `${matches.length.toLocaleString()} 个 API`;
     ui.keyPrevPage.disabled = state.keyPage === 0;
     ui.keyNextPage.disabled = state.keyPage >= pages - 1;
     ui.keyList.innerHTML = '';
@@ -2275,15 +2406,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const selectedRoutes = getVoiceRoutes();
     const priorities = getAllocationPriorities();
     if (visibleItems.length === 0) {
-      ui.keyList.innerHTML = '<div class="empty-tip">没有匹配的 API</div>';
+      ui.keyList.innerHTML = showProblemKeysOnly ? '<div class="empty-tip">暂无异常或已跳过的 API</div>' : '<div class="empty-tip">没有匹配的 API</div>';
       return;
     }
 
     visibleItems.forEach(({ item, idx }) => {
       const div = document.createElement('div');
       const isActive = item.key === state.currentKey;
-      div.className = 'key-item ' + (isActive ? 'active' : '');
+      const mappedId = selectedRoutes.get(item.key);
+      const skipRecord = state.generationSkips.limits(item.key, mappedId, ui.model.value, selectedOutputFormat()).record;
+      div.className = 'key-item ' + (isActive ? 'active ' : '') + (skipRecord ? 'key-skipped' : '');
       div.dataset.key = item.key;
+      div.dataset.alias = item.alias;
       div.innerHTML =
         '<div class="key-main-info">' +
           '<div class="key-header">' +
@@ -2308,8 +2442,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const aliasSpan = div.querySelector('.key-alias');
       const editBtn = div.querySelector('.key-edit');
       const voice = selectedVoiceId();
-      const mappedId = selectedRoutes.get(item.key);
-      div.querySelector('.generation-diagnostic').textContent = generationDiagnostic(state.generationSkips.limits(item.key, mappedId, ui.model.value, selectedOutputFormat()).record);
+      div.querySelector('.generation-diagnostic').textContent = generationDiagnostic(skipRecord);
       div.querySelector('.allocation-diagnostic').textContent = allocationDiagnostic(priorities.get(item.key), state.quotaListCache[item.key]);
       const voiceInfo = mappedId && getVoiceCache(item.key, mappedId);
       const voiceTag = div.querySelector('.voice-access-tag');
@@ -2326,6 +2459,29 @@ document.addEventListener('DOMContentLoaded', () => {
         button.addEventListener('click', async event => { event.stopPropagation(); await retryAccountQuery(item.key, topic); });
         div.querySelector('.key-actions').appendChild(button);
       }
+      const skipBtn = document.createElement('button');
+      skipBtn.type = 'button';
+      skipBtn.className = 'skip-toggle-btn' + (skipRecord ? ' is-skipped' : '');
+      skipBtn.textContent = skipRecord ? '恢复' : '跳过';
+      skipBtn.title = skipRecord ? '解除跳过，恢复此账号参与生成' : '手动跳过此账号，暂不参与生成';
+      skipBtn.setAttribute('aria-label', item.alias + ' ' + skipBtn.title);
+      skipBtn.disabled = state.batchRunning || state.keyMaintenance;
+      skipBtn.addEventListener('click', async event => {
+        event.stopPropagation();
+        if (state.batchRunning || state.keyMaintenance) return;
+        const currentlySkipped = Boolean(state.generationSkips.limits(item.key, mappedId, ui.model.value, selectedOutputFormat()).record);
+        if (currentlySkipped) {
+          state.generationSkips.clearKey(item.key);
+          ui.generationSkipStatus.textContent = `已恢复「${item.alias}」参与生成`;
+        } else {
+          state.generationSkips.markManual(item.key, '已在设置中手动跳过');
+          ui.generationSkipStatus.textContent = `已跳过「${item.alias}」，继续生成时将不再使用该账号`;
+        }
+        await saveQuotaSnapshot().catch(() => {});
+        renderVoicePoolSummary();
+        renderKeyList();
+      });
+      div.querySelector('.key-actions').appendChild(skipBtn);
       const family = !ui.customVoiceId.value.trim() && state.voiceFamilies.get(voice);
       const choices = family && family.byKey.get(item.key);
       if (choices && choices.length) {
@@ -2795,6 +2951,7 @@ document.addEventListener('DOMContentLoaded', () => {
           disabled: Boolean(fresh && info.disabled) || limits.disabled || priority.blocked,
           ceiling: quotaBlocked || knownZero ? 0 : limits.ceiling,
           readyAt: limits.readyAt,
+          healthRank: info.quotaState === 'ok' ? 0 : (info.quotaState === 'network' || info.quotaState === 'unknown') ? 2 : 1,
           priorityRank: priority.rank,
           priorityCoverage: priority.coverage,
           priorityReserved: priority.reserved,
@@ -2807,32 +2964,7 @@ document.addEventListener('DOMContentLoaded', () => {
         stopped: () => state.batchRunning,
         estimate: text => ElevenApiPool.estimateCost(text, model),
         generate: async (job, entry) => {
-          let info = state.quotaListCache[entry.key];
-          const recentPermissionSkip = Boolean(info && info.quotaState === 'permission' && Number.isFinite(info.ts) && Date.now() - info.ts < 1800000);
-          const knownExhaustedSkip = Boolean(info && !info.needsQuotaRefresh && Number.isFinite(info.left) && info.left <= 0 &&
-            Number.isFinite(info.ts) && info.ts <= Date.now() && (!info.resetUnix || info.resetUnix * 1000 > Date.now()));
-          if (!ElevenVoiceIndex.freshQuota(info) && !recentPermissionSkip && !knownExhaustedSkip) {
-            info = await getQuotaInfo(entry.key);
-          }
-          info = state.quotaListCache[entry.key] || info;
-          if (info) {
-            if (info.disabled) throw Object.assign(new Error(info.message || 'API 不可用'), {
-              preflight: true, status: info.httpStatus || (info.invalid ? 401 : 403), code: info.errorCode || (info.invalid ? 'invalid_api_key' : 'workspace_access_denied')
-            });
-            if (info.quotaState === 'quota') {
-              entry.account.remaining = 0;
-              entry.ceiling = 0;
-              throw Object.assign(new Error('当前账号额度受限 (You have 0 credits remaining)'), { preflight: true, status: 401, code: 'quota_exceeded' });
-            }
-            if (Number.isFinite(info.left)) {
-              entry.account.remaining = info.left;
-              const requiredCost = ElevenApiPool.estimateCost(job.text, model);
-              if (info.left < requiredCost) {
-                entry.ceiling = Math.min(entry.ceiling, Math.max(0, info.left));
-                throw Object.assign(new Error(`当前账号额度不足 (You have ${info.left} credits remaining)`), { preflight: true, status: 401, code: 'quota_exceeded' });
-              }
-            }
-          }
+          await preflightAccountEntry(entry, job.text, model, pool);
           const result = await generate(job.text, { ...cfg, voice: entry.voiceId, key: entry.key });
           state.voiceAccessCache.set(voiceCacheKey(entry.key, entry.voiceId), { key: entry.key, voice: entry.voiceId, access: 'available', ts: Date.now() });
           return result;
@@ -3063,7 +3195,10 @@ document.addEventListener('DOMContentLoaded', () => {
           return;
         }
         if (!confirm('未找到缓存音频。重新生成可能再次消耗额度，是否继续？')) return;
-      } else if (!confirm('重新生成会再次消耗额度。请先确认生成历史，是否继续？')) return;
+      } else {
+        const acctHint = div.taskData.account ? `上次在「${div.taskData.account}」生成结果待确认（该账号已自动跳过 12 小时）。\n` : '';
+        if (!confirm(`${acctHint}重新生成会再次消耗额度。请先确认生成历史，是否继续？`)) return;
+      }
       div.taskData.account = ''; div.taskData.downloadId = null;
       setTaskStatus(div, 'pending');
     });

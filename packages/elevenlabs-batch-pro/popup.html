@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>ElevenLabs 负载均衡工坊 8.0.2</title>
+  <title>ElevenLabs 负载均衡工坊 8.0.3</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
       <div class="sidebar-header">
         <div class="brand">
           <span class="logo-icon">🎙️</span>
-          <span class="logo-text">ElevenLabs <small>负载均衡 8.0.2</small></span>
+          <span class="logo-text">ElevenLabs <small>负载均衡 8.0.3</small></span>
         </div>
         <div class="header-actions">
           <button id="checkUpdateBtn" class="icon-btn-round" title="检查 GitHub 最新版本更新">🔄</button>
@@ -340,8 +340,10 @@
           </div>
           <div class="key-manager-box">
             <div class="key-list-toolbar">
-              <input id="keySearch" type="search" aria-label="搜索 API" placeholder="搜索备注或 Key 尾号">
+              <input id="keySearch" type="search" aria-label="搜索 API" placeholder="搜索备注(如 账号8)、尾号或异常">
               <button id="refreshKeysBtn" class="btn-text-small" title="刷新全部 API 额度">刷新额度</button>
+              <button id="renameKeysSequentialBtn" class="btn-text-small" type="button" title="按当前顺序一键重命名为 账号 1、账号 2...">顺序重命名</button>
+              <button id="filterProblemKeysBtn" class="btn-text-small" type="button" aria-pressed="false" title="只查看连接异常、已跳过、无效或用尽的 API">只看异常</button>
               <button id="cleanupKeysBtn" class="btn-text-small cleanup-key-button" title="核验并按所选范围清理 API">一键清理</button>
               <button id="undoKeyCleanupBtn" class="icon-btn-small" title="撤销上次清理" aria-label="撤销上次清理" disabled>&#8630;</button>
             </div>
