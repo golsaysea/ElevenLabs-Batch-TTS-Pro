@@ -733,5 +733,102 @@
     await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker));
   }
 
-  return { Pool, GenerationSkips, run, estimateCost, extractFirstSentence, formatDuration, estimateDuration, splitTextIntoTwo, splitOverThreeMinutes, expandOverThreeMinutes, classifyError, isFormatAccessError, formatFromError, splitTexts, summarize };
+  const AUDIO_EXT_RE = /\.(mp3|wav|mp4|m4a|ogg|aac|flac|webm|opus)$/i;
+
+  function parseAudioSequenceInfo(filePathOrName) {
+    const raw = String(filePathOrName || '').trim();
+    if (!raw) return null;
+    const base = raw.split(/[\\/]/).pop() || '';
+    if (!AUDIO_EXT_RE.test(base)) return null;
+    const match = base.match(/^(\d+)(?:[_\-.\s]|(?=\.[^.]+$))/);
+    if (!match) return null;
+    const token = match[1];
+    // Ignore 6+ digit timestamps / YYYYMMDD prefixes.
+    if (token.length > 5) return null;
+    const index = Number.parseInt(token, 10);
+    if (!Number.isFinite(index) || index < 1 || index > 99999) return null;
+    const isZeroPadded = token.length >= 2 && token.startsWith('0');
+    return { index, padWidth: isZeroPadded ? token.length : 0, basename: base };
+  }
+
+  function normalizeRelativeFolder(baseFolder, subFolder = '', nestedSub = false) {
+    const sanitizeSegment = value => String(value || '')
+      .replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')
+      .replace(/^\.+|[. ]+$/g, '')
+      .trim();
+    const sanitizeNested = value => String(value || '')
+      .replace(/[:*?"<>|\x00-\x1f]/g, '_')
+      .trim()
+      .replace(/[. ]+$/g, '');
+    const base = sanitizeSegment(baseFolder) || 'ElevenLabs_Pro';
+    if (!nestedSub) {
+      const sub = sanitizeSegment(subFolder);
+      return sub ? `${base}/${sub}` : base;
+    }
+    const subParts = String(subFolder || '').split(/[\\/]+/).map(sanitizeNested).filter(Boolean)
+      .map(part => /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part) ? `_${part}` : part);
+    return subParts.length ? `${base}/${subParts.join('/')}` : base;
+  }
+
+  function scanFolderSequences(items, targetRelDir = '', defaultPadWidth = 4) {
+    const targetLower = String(targetRelDir || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase();
+    const usedIndices = new Set();
+    let maxIndex = 0;
+    let detectedPadWidth = 0;
+    let fileCount = 0;
+    for (const item of items || []) {
+      const nameOrPath = typeof item === 'string' ? item : item && item.filename;
+      if (!nameOrPath) continue;
+      if (typeof item === 'object') {
+        if (item.exists === false) continue;
+        if (item.state && item.state !== 'complete') continue;
+      }
+      const norm = String(nameOrPath).replace(/\\/g, '/');
+      const lastSlash = norm.lastIndexOf('/');
+      const basename = lastSlash >= 0 ? norm.slice(lastSlash + 1) : norm;
+      if (targetLower) {
+        const parentLower = (lastSlash >= 0 ? norm.slice(0, lastSlash) : '').toLowerCase();
+        if (!parentLower || (parentLower !== targetLower && !parentLower.endsWith('/' + targetLower))) continue;
+      }
+      const parsed = parseAudioSequenceInfo(basename);
+      if (!parsed) continue;
+      fileCount++;
+      usedIndices.add(parsed.index);
+      if (parsed.index > maxIndex) maxIndex = parsed.index;
+      if (parsed.padWidth > detectedPadWidth) detectedPadWidth = parsed.padWidth;
+    }
+    const padWidth = detectedPadWidth > 0 ? detectedPadWidth : Math.max(0, Number(defaultPadWidth) || 0);
+    return { maxIndex, usedIndices, padWidth, fileCount, nextIndex: maxIndex + 1 };
+  }
+
+  function formatSequenceNumber(index, padWidth = 4) {
+    const n = Math.max(1, Number(index) || 1);
+    return padWidth > 0 ? String(n).padStart(padWidth, '0') : String(n);
+  }
+
+  function assignSequenceIndices(jobs, options = {}) {
+    const scan = options.scan || { maxIndex: 0, usedIndices: new Set(), padWidth: options.defaultPadWidth ?? 4 };
+    const continueSeq = options.continueSeq !== false;
+    const onScreenFloor = Number.isFinite(options.onScreenMaxIndex) ? options.onScreenMaxIndex : 0;
+    const used = new Set(scan.usedIndices || []);
+    let seqCursor = continueSeq ? Math.max(scan.maxIndex || 0, onScreenFloor) : 0;
+    const assigned = new Set();
+    return (jobs || []).map((job, idx) => {
+      const existingCardIndex = Number(job && job.cardIndex);
+      let index;
+      if (!continueSeq) {
+        index = existingCardIndex > 0 ? existingCardIndex : idx + 1;
+      } else if (existingCardIndex > 0 && !used.has(existingCardIndex) && !assigned.has(existingCardIndex)) {
+        index = existingCardIndex;
+        if (index > seqCursor) seqCursor = index;
+      } else {
+        do { seqCursor++; } while (used.has(seqCursor) || assigned.has(seqCursor));
+        index = seqCursor;
+      }
+      assigned.add(index);
+      return index;
+    });
+  }
+
+  return { Pool, GenerationSkips, run, estimateCost, extractFirstSentence, formatDuration, estimateDuration, splitTextIntoTwo, splitOverThreeMinutes, expandOverThreeMinutes, classifyError, isFormatAccessError, formatFromError, splitTexts, summarize, parseAudioSequenceInfo, normalizeRelativeFolder, scanFolderSequences, formatSequenceNumber, assignSequenceIndices };
 });

@@ -62,6 +62,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // 路径与内容区
     baseFolderInput: getEl('baseFolderInput'),
     quickFolder: getEl('quickFolderInput'),
+    pickLocalFolderBtn: getEl('pickLocalFolderBtn'),
+    unlinkLocalFolderBtn: getEl('unlinkLocalFolderBtn'),
+    continueFolderSeq: getEl('continueFolderSeq'),
+    folderSeqHint: getEl('folderSeqHint'),
     openFolder: getEl('quickOpenFolderBtn'),
     container: getEl('listContainer'), // 核心容器
     addBtn: getEl('addCardBtn'),
@@ -235,6 +239,9 @@ document.addEventListener('DOMContentLoaded', () => {
     currentQuota: 0,
     folder: '',
     baseFolder: 'ElevenLabs_Pro',
+    continueFolderSeq: true,
+    linkedDirHandle: null,
+    folderScanCache: null,
     voiceList: [],
     quotaListCache: {},
     voiceAccessCache: new Map(),
@@ -538,6 +545,8 @@ document.addEventListener('DOMContentLoaded', () => {
       state.currentKey = normalizeApiKey(res.xi_key) || '';
       if (!state.currentKey && state.keys.length) state.currentKey = state.keys[0].key;
       state.folder = res.save_folder || '';
+      state.continueFolderSeq = res.continue_folder_seq !== false;
+      if (ui.continueFolderSeq) ui.continueFolderSeq.checked = state.continueFolderSeq;
       state.keyPage = 0;
       ui.keySearch.value = '';
       chrome.storage.local.remove(['active_key_group', 'pool_scope']);
@@ -635,6 +644,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       state.ready = true;
       if (!ui.settingsModal.classList.contains('hidden')) renderKeyList();
+      restoreLinkedDirectoryHandle().then(() => refreshFolderSeqHint()).catch(() => refreshFolderSeqHint());
       scanPool();
     });
   }
@@ -670,17 +680,157 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 文件夹输入监听
+  // 文件夹与续排序号监听
+  let folderScanRevision = 0;
+  let folderScanTimer = null;
+
+  async function ensureDirectoryPermission(handle, mode = 'readwrite', promptUser = false) {
+    if (!handle) return false;
+    if (typeof handle.queryPermission !== 'function') return true;
+    try {
+      const current = await handle.queryPermission({ mode });
+      if (current === 'granted') return true;
+      if (!promptUser || typeof handle.requestPermission !== 'function') return false;
+      return (await handle.requestPermission({ mode })) === 'granted';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function listDirectoryFilenames(dirHandle) {
+    const names = [];
+    if (!dirHandle || typeof dirHandle.values !== 'function') return names;
+    for await (const entry of dirHandle.values()) {
+      if (entry && entry.kind === 'file' && entry.name) names.push(entry.name);
+    }
+    return names;
+  }
+
+  async function restoreLinkedDirectoryHandle() {
+    try {
+      const handle = await ElevenAudioStore.getHandle('output_dir');
+      if (handle && typeof handle === 'object' && handle.name) {
+        state.linkedDirHandle = handle;
+        if (!state.folder && ui.quickFolder) {
+          state.folder = handle.name;
+          ui.quickFolder.value = handle.name;
+        }
+      }
+    } catch (_) {
+      state.linkedDirHandle = null;
+    }
+  }
+
+  async function clearLinkedDirectoryHandle(silent = false) {
+    state.linkedDirHandle = null;
+    await ElevenAudioStore.removeHandle('output_dir').catch(() => {});
+    if (ui.unlinkLocalFolderBtn) ui.unlinkLocalFolderBtn.classList.add('hidden');
+    if (!silent) setStatus('已取消绑定本地文件夹，改回保存到浏览器下载目录');
+    await refreshFolderSeqHint();
+  }
+
+  async function scanCurrentFolderSequence() {
+    const relDir = ElevenApiPool.normalizeRelativeFolder(state.baseFolder, state.folder, false);
+    if (state.linkedDirHandle) {
+      const granted = await ensureDirectoryPermission(state.linkedDirHandle, 'read', false);
+      if (!granted) {
+        return { source: 'local_locked', dirName: state.linkedDirHandle.name, maxIndex: 0, usedIndices: new Set(), padWidth: 4, fileCount: 0, nextIndex: 1 };
+      }
+      const names = await listDirectoryFilenames(state.linkedDirHandle);
+      return { source: 'local', dirName: state.linkedDirHandle.name, ...ElevenApiPool.scanFolderSequences(names, '', 4) };
+    }
+    const items = await new Promise(resolve => {
+      if (!chrome?.downloads?.search) return resolve([]);
+      chrome.downloads.search({ state: 'complete' }, list => {
+        if (chrome.runtime?.lastError) return resolve([]);
+        resolve(Array.isArray(list) ? list : []);
+      });
+    });
+    return { source: 'downloads', dirName: relDir, ...ElevenApiPool.scanFolderSequences(items, relDir, 4) };
+  }
+
+  async function refreshFolderSeqHint() {
+    const rev = ++folderScanRevision;
+    if (ui.unlinkLocalFolderBtn) ui.unlinkLocalFolderBtn.classList.toggle('hidden', !state.linkedDirHandle);
+    try {
+      const scan = await scanCurrentFolderSequence();
+      if (rev !== folderScanRevision) return;
+      state.folderScanCache = scan;
+      if (!ui.folderSeqHint) return;
+      const fmt = n => ElevenApiPool.formatSequenceNumber(n, scan.padWidth || 4);
+      if (scan.source === 'local_locked') {
+        ui.folderSeqHint.textContent = `📁 ${scan.dirName} (需授权读取)`;
+      } else if (!state.continueFolderSeq) {
+        ui.folderSeqHint.textContent = '已关闭续排 · 从 0001 起';
+      } else if (scan.maxIndex > 0) {
+        ui.folderSeqHint.textContent = `${state.linkedDirHandle ? `📁 ` : ''}已有至 ${fmt(scan.maxIndex)} · 从 ${fmt(scan.nextIndex)} 起`;
+      } else {
+        ui.folderSeqHint.textContent = `${state.linkedDirHandle ? `📁 ${scan.dirName} · ` : ''}下批从 ${fmt(1)} 起`;
+      }
+    } catch (_) {
+      if (ui.folderSeqHint) ui.folderSeqHint.textContent = '下批从 0001 起';
+    }
+  }
+
+  function scheduleFolderSeqHintRefresh() {
+    clearTimeout(folderScanTimer);
+    folderScanTimer = setTimeout(() => { refreshFolderSeqHint(); }, 180);
+  }
+
   if (ui.baseFolderInput) {
     ui.baseFolderInput.addEventListener('input', (e) => {
       state.baseFolder = e.target.value.trim() || 'ElevenLabs_Pro';
       chrome.storage.local.set({ 'base_folder_name': state.baseFolder });
+      scheduleFolderSeqHintRefresh();
     });
   }
   if (ui.quickFolder) {
     ui.quickFolder.addEventListener('input', (e) => {
       state.folder = e.target.value.trim();
       chrome.storage.local.set({ 'save_folder': state.folder });
+      if (state.linkedDirHandle && state.folder !== state.linkedDirHandle.name) {
+        clearLinkedDirectoryHandle(true);
+      } else {
+        scheduleFolderSeqHintRefresh();
+      }
+    });
+  }
+  if (ui.continueFolderSeq) {
+    ui.continueFolderSeq.addEventListener('change', () => {
+      state.continueFolderSeq = Boolean(ui.continueFolderSeq.checked);
+      chrome.storage.local.set({ continue_folder_seq: state.continueFolderSeq });
+      refreshFolderSeqHint();
+    });
+  }
+  if (ui.unlinkLocalFolderBtn) {
+    ui.unlinkLocalFolderBtn.addEventListener('click', () => {
+      if (!state.batchRunning) clearLinkedDirectoryHandle(false);
+    });
+  }
+  if (ui.pickLocalFolderBtn) {
+    ui.pickLocalFolderBtn.addEventListener('click', async () => {
+      if (state.batchRunning) return;
+      if (typeof window.showDirectoryPicker !== 'function') {
+        return showError('当前浏览器不支持直接选择磁盘文件夹；请在左侧直接填写任务子文件夹名，系统同样会自动延续历史编号。');
+      }
+      try {
+        const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        if (!handle) return;
+        state.linkedDirHandle = handle;
+        await ElevenAudioStore.putHandle('output_dir', handle).catch(() => {});
+        state.folder = handle.name || state.folder;
+        if (ui.quickFolder) ui.quickFolder.value = state.folder;
+        chrome.storage.local.set({ save_folder: state.folder });
+        await refreshFolderSeqHint();
+        const scan = state.folderScanCache;
+        const nextLabel = scan && scan.maxIndex > 0
+          ? `检测到已有至 ${ElevenApiPool.formatSequenceNumber(scan.maxIndex, scan.padWidth || 4)}，新音频将从 ${ElevenApiPool.formatSequenceNumber(scan.nextIndex, scan.padWidth || 4)} 起直接写入该目录`
+          : '该文件夹暂无编号音频，新音频将从 0001 起直接写入该目录';
+        setStatus(`📁 已绑定「${handle.name}」：${nextLabel}`);
+      } catch (error) {
+        if (error && error.name === 'AbortError') return;
+        showError(`选择文件夹失败：${error.message || '未获得读写权限'}`);
+      }
     });
   }
 
@@ -710,13 +860,12 @@ document.addEventListener('DOMContentLoaded', () => {
     ta.remove();
     return true;
   }
-  function buildBatchSheetCsv(records) {
+  function buildBatchSheetCsvLines(records) {
     const escapeCsv = (val) => {
       const str = String(val ?? '').replace(/\r\n?/g, '\n');
       return '"' + str.replace(/"/g, '""') + '"';
     };
-    const header = '序号,音频文件名,分段说明,字数,预计时长,状态,完整文案';
-    const lines = records.map(r => [
+    return records.map(r => [
       escapeCsv(r.indexLabel),
       escapeCsv(r.audioFilename),
       escapeCsv(r.splitNote || '原段'),
@@ -725,14 +874,60 @@ document.addEventListener('DOMContentLoaded', () => {
       escapeCsv(r.status || '已完成'),
       escapeCsv(r.text)
     ].join(','));
-    return '\uFEFF' + [header, ...lines].join('\r\n') + '\r\n';
+  }
+  function buildBatchSheetCsv(records) {
+    const header = '序号,音频文件名,分段说明,字数,预计时长,状态,完整文案';
+    return '\uFEFF' + [header, ...buildBatchSheetCsvLines(records)].join('\r\n') + '\r\n';
+  }
+  async function writeBlobToDirectory(dirHandle, basename, blob) {
+    const dot = basename.lastIndexOf('.');
+    const stem = dot > 0 ? basename.slice(0, dot) : basename;
+    const ext = dot > 0 ? basename.slice(dot) : '';
+    let candidate = basename;
+    for (let attempt = 1; attempt <= 200; attempt++) {
+      let exists = false;
+      try {
+        await dirHandle.getFileHandle(candidate, { create: false });
+        exists = true;
+      } catch (_) {
+        exists = false;
+      }
+      if (!exists) break;
+      candidate = `${stem} (${attempt})${ext}`;
+    }
+    const fileHandle = await dirHandle.getFileHandle(candidate, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return candidate;
   }
   async function saveBatchSheetCsv(records, cfg) {
     if (!Array.isArray(records) || !records.length) return;
-    const safe = value => String(value || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/^\.+|[. ]+$/g, '').trim();
-    const base = safe(cfg.baseFolder) || 'ElevenLabs_Pro';
-    const sub = safe(cfg.folder);
-    const csvPath = sub ? `${base}/${sub}/000_文案对照表.csv` : `${base}/000_文案对照表.csv`;
+    if (cfg && cfg.dirHandle) {
+      try {
+        let existingText = '';
+        try {
+          const existingHandle = await cfg.dirHandle.getFileHandle('000_文案对照表.csv', { create: false });
+          const file = await existingHandle.getFile();
+          existingText = await file.text();
+        } catch (_) {}
+        const csvName = '000_文案对照表.csv';
+        let finalContent;
+        if (existingText && /^(?:\uFEFF)?序号,/.test(existingText)) {
+          const prefix = existingText.endsWith('\n') ? existingText : existingText + '\r\n';
+          finalContent = prefix + buildBatchSheetCsvLines(records).join('\r\n') + '\r\n';
+        } else {
+          finalContent = buildBatchSheetCsv(records);
+        }
+        const fileHandle = await cfg.dirHandle.getFileHandle(csvName, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(new Blob([finalContent], { type: 'text/csv;charset=utf-8;' }));
+        await writable.close();
+        return;
+      } catch (_) { /* Fallback cleanly to browser downloads below */ }
+    }
+    const relDir = ElevenApiPool.normalizeRelativeFolder(cfg.baseFolder, cfg.folder, false);
+    const csvPath = `${relDir}/000_文案对照表.csv`;
     const csvContent = buildBatchSheetCsv(records);
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -1275,16 +1470,32 @@ document.addEventListener('DOMContentLoaded', () => {
     const voice = selectedVoiceId();
     const routes = getVoiceRoutes(voice);
     if (!routes.size) return showError('请选择已汇总的声音，或输入有效 Voice ID。');
+    let activeDirHandle = state.linkedDirHandle || null;
+    if (activeDirHandle) {
+      const granted = await ensureDirectoryPermission(activeDirHandle, 'readwrite', true);
+      if (!granted) {
+        return showError(`未获得本地文件夹「${activeDirHandle.name}」的读写权限。\n请点击生成并在弹窗中允许权限，或点击文件夹旁的「✕」改回默认下载目录。`);
+      }
+    }
     const allJobTexts = batchJobs.map(j => j.text).join('\n');
     if (textHasBracketAudioTag(allJobTexts) && TAG_UNSUPPORTED_V2_MODELS.has(ui.model.value)) {
       ensureTagCompatibleModel(allJobTexts);
     }
+    const folderScan = await scanCurrentFolderSequence();
+    const onScreenMaxIndex = allJobCards.reduce((maxVal, item) =>
+      !['pending', 'failed'].includes(item.card.dataset.status) && item.card.taskData.index > maxVal ? item.card.taskData.index : maxVal, 0);
+    const padWidth = state.continueFolderSeq && folderScan.padWidth ? folderScan.padWidth : 4;
+    const assignedIndices = ElevenApiPool.assignSequenceIndices(
+      batchJobs.map(job => ({ cardIndex: job.card.taskData.index })),
+      { scan: folderScan, continueSeq: state.continueFolderSeq, onScreenMaxIndex }
+    );
+    batchJobs.forEach((job, idx) => { job.index = assignedIndices[idx]; });
     const rawFormat = ui.format.value;
     const cfg = { voice, model: ui.model.value, apiFormat: selectedOutputFormat(),
       fileExt: rawFormat === 'mp3_as_mp4' ? 'mp4' : rawFormat.startsWith('pcm') ? 'wav' : 'mp3',
       voiceSettings: readVoiceSettings(ui.model.value),
       audioEffects: buildAudioEffectsPayload(),
-      folder: state.folder, baseFolder: state.baseFolder };
+      folder: state.folder, baseFolder: state.baseFolder, padWidth, dirHandle: activeDirHandle };
     state.pauseRequested = false;
     batchJobs.forEach(job => { job.card.taskData.index = job.index; setTaskStatus(job.card, 'pending', null, '', false); });
     const batchSpeed = currentSpeechSpeed();
@@ -1295,7 +1506,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return {
         jobId: job.card.taskData.id,
         index: job.index,
-        indexLabel: String(job.index).padStart(4, '0'),
+        indexLabel: ElevenApiPool.formatSequenceNumber(job.index, cfg.padWidth || 4),
         audioFilename,
         splitNote: job.card.dataset.splitNote || '原段',
         chars: Array.from(job.text).length,
@@ -1403,15 +1614,16 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         download: async (job, result) => {
           const filename = buildDownloadPath(job.text, cfg, job.index);
-          const saved = { blob: result.blob, filename };
+          const basename = filename.split('/').pop();
+          const saved = { blob: result.blob, filename, basename };
           job.card.audioResult = saved;
           await ElevenAudioStore.put(job.card.taskData.id, saved).catch(() => {});
-          await downloadAudio(job.card, saved);
+          const writtenName = await downloadAudio(job.card, saved, cfg.dirHandle);
           const rec = batchSheetRecords.find(r => r.jobId === job.card.taskData.id);
           if (rec) {
             rec.downloaded = true;
             rec.status = '已完成';
-            rec.audioFilename = filename.split('/').pop();
+            rec.audioFilename = writtenName || basename;
           }
           job.card.audioResult = null;
           await ElevenAudioStore.remove(job.card.taskData.id).catch(() => {});
@@ -1456,6 +1668,7 @@ document.addEventListener('DOMContentLoaded', () => {
       updateBatchProgress();
       renderPoolControls();
       saveCards();
+      refreshFolderSeqHint();
       const problemCards = batchJobs.filter(job => ['failed', 'uncertain', 'download_failed'].includes(job.card.dataset.status));
       const problemAccounts = [...new Set(problemCards.map(job => job.card.taskData.account).filter(Boolean))];
       const problemHint = problemAccounts.length ? `（出错账号：${problemAccounts.join('、')}，已自动跳过，可点⚙️搜索名称检查或删除）` : '';
@@ -1546,13 +1759,20 @@ document.addEventListener('DOMContentLoaded', () => {
   function buildDownloadPath(text, cfg, index) {
     const safe = value => String(value || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/^\.+|[. ]+$/g, '').trim();
     const cleanText = String(text || '').replace(/^\s*(?:\[[^\]\n]{1,300}\]\s*)+/, '').trim() || String(text || '');
-    const filename = `${String(index).padStart(4, '0')}_${safe(cleanText.substring(0, 15)) || 'audio'}.${cfg.fileExt}`;
-    const base = safe(cfg.baseFolder) || 'ElevenLabs_Pro';
-    const sub = safe(cfg.folder);
-    return sub ? `${base}/${sub}/${filename}` : `${base}/${filename}`;
+    const seqLabel = ElevenApiPool.formatSequenceNumber(index, cfg.padWidth || 4);
+    const filename = `${seqLabel}_${safe(cleanText.substring(0, 15)) || 'audio'}.${cfg.fileExt}`;
+    const relDir = ElevenApiPool.normalizeRelativeFolder(cfg.baseFolder, cfg.folder, false);
+    return `${relDir}/${filename}`;
   }
 
-  async function downloadAudio(card, result) {
+  async function downloadAudio(card, result, dirHandle = null) {
+    if (dirHandle) {
+      const basename = result.basename || String(result.filename || 'audio.mp3').split('/').pop();
+      const writtenName = await writeBlobToDirectory(dirHandle, basename, result.blob);
+      card.taskData.savedLocalFile = writtenName;
+      saveCards();
+      return writtenName;
+    }
     const url = URL.createObjectURL(result.blob);
     try {
       const id = await new Promise((resolve, reject) => chrome.downloads.download({ url, filename: result.filename, saveAs: false, conflictAction: 'uniquify' }, downloadId => {
@@ -2651,11 +2871,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // 打开文件夹
   if (ui.openFolder) {
     ui.openFolder.addEventListener('click', () => {
+      if (state.linkedDirHandle) {
+        setStatus(`📁 当前已直接绑定本地文件夹「${state.linkedDirHandle.name}」，音频将直接写入该文件夹`);
+      }
       const sub = state.folder.replace(/[\\:*?"<>|]/g, "_") || "ElevenLabs_Pro";
       chrome.downloads.search({ limit: 10, orderBy: ['-startTime'] }, (items) => {
         let f = false;
         for (let i of items) if (i.exists && i.filename.includes(sub)) { chrome.downloads.show(i.id); f = true; break; }
-        if (!f) chrome.downloads.showDefaultFolder();
+        if (!f && !state.linkedDirHandle) chrome.downloads.showDefaultFolder();
       });
     });
   }
